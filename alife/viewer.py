@@ -378,6 +378,8 @@ class PlanetViewer:
         self.event_log_modal_row_rects: list[tuple[pygame.Rect, int, tuple[int, int] | None]] = []
         self.event_log_row_rects: list[tuple[pygame.Rect, int, tuple[int, int] | None]] = []
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.runtime_save_preset_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.runtime_status_message = ""
         self.life_tree_modal_open = False
         self.life_tree_modal_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
@@ -537,6 +539,10 @@ class PlanetViewer:
             self.panel_collapsed = True
             self._update_layout()
             self._invalidate_cache()
+            return
+
+        if self.runtime_save_preset_button_rect.collidepoint(pos):
+            self._save_current_preset(status_target="runtime")
             return
 
         if self.life_tree_button_rect.collidepoint(pos) and self.planet.species:
@@ -871,6 +877,7 @@ class PlanetViewer:
         self.event_log_modal_row_rects = []
         self.event_log_row_rects = []
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.runtime_save_preset_button_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_row_rects = []
         self.load_preset_modal_close_rect = pygame.Rect(0, 0, 0, 0)
@@ -899,7 +906,10 @@ class PlanetViewer:
 
         y = self._draw_settings_row(x, y)
         y += 7
-        y = self._draw_global_life_tree_button(x, y, content_w)
+        y = self._draw_runtime_action_buttons(x, y, content_w)
+        if self.runtime_status_message:
+            self._draw_text(self._clip_text(self.runtime_status_message, max(24, content_w // 7)), x, y, self.tiny_font, (155, 210, 170))
+            y += 16
         y += 8
 
         y = self._draw_compact_controls(x, y, content_w)
@@ -1203,11 +1213,7 @@ class PlanetViewer:
         elif action == "random_seed":
             self._randomize_setup_seed()
         elif action == "save_preset":
-            try:
-                path = save_world_preset(self.planet.config)
-                self.setup_status_message = f"Saved preset: {path.name}"
-            except Exception as exc:
-                self.setup_status_message = f"Save failed: {exc}"
+            self._save_current_preset(status_target="setup")
         elif action == "open_load_preset":
             self.load_preset_modal_open = True
         elif action == "seed_delta":
@@ -1215,6 +1221,18 @@ class PlanetViewer:
         elif action == "field_delta":
             field_key, direction_text = key.split(":", 1)
             self._adjust_setup_field(field_key, int(direction_text))
+
+    def _save_current_preset(self, *, status_target: str) -> None:
+        """Save only the reproducible planet preset, not live simulation state."""
+        try:
+            path = save_world_preset(self.planet.config)
+            message = f"Saved preset: {path.name}"
+        except Exception as exc:
+            message = f"Save failed: {exc}"
+        if status_target == "setup":
+            self.setup_status_message = message
+        else:
+            self.runtime_status_message = message
 
     def _begin_start_flow(self) -> None:
         if self.skip_intro:
@@ -2340,6 +2358,22 @@ class PlanetViewer:
         self.panel_hide_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
         self._draw_button(self.panel_hide_button_rect, "Hide panel")
         return y + button_h
+
+    def _draw_runtime_action_buttons(self, x: int, y: int, width: int) -> int:
+        """Draw runtime actions that should be available after simulation starts."""
+        gap = 8
+        button_h = 27
+        if self.planet.species:
+            button_w = max(120, (width - gap) // 2)
+            self.runtime_save_preset_button_rect = pygame.Rect(x, y, button_w, button_h)
+            self.life_tree_button_rect = pygame.Rect(x + button_w + gap, y, width - button_w - gap, button_h)
+            self._draw_button(self.runtime_save_preset_button_rect, "Save preset")
+            self._draw_button(self.life_tree_button_rect, "Life tree")
+        else:
+            self.runtime_save_preset_button_rect = pygame.Rect(x, y, width, button_h)
+            self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
+            self._draw_button(self.runtime_save_preset_button_rect, "Save preset")
+        return y + button_h + 4
 
     def _draw_global_life_tree_button(self, x: int, y: int, width: int) -> int:
         """Draw the global life-tree button once any lineage exists."""

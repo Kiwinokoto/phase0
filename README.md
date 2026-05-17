@@ -2,7 +2,7 @@
 
 Prototype Python minimal pour générer et observer une planète 2D/3D avec proto-vie abstraite, interactions écologiques, mobilité et colonisation.
 
-Phase 6 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle ajoute plutôt une mobilité populationnelle : les lignées peuvent se disperser passivement, migrer activement vers de meilleurs habitats, coloniser des fronts locaux, puis brancher plus facilement quand des colonies deviennent isolées.
+Phase 7 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle ajoute des traits morphologiques héritables — taille, structure, armure, vitesse, longévité, fragilité et complexité — tout en gardant une simulation par populations de lignées.
 
 
 ## Écran d’accueil / setup planète
@@ -31,6 +31,8 @@ Load preset   ouvre une modale listant les derniers presets sauvegardés
 ```
 
 Ce n'est pas encore un vrai save-game : les espèces, populations, événements et l'état RNG de la simulation en cours ne sont pas sauvegardés. C'est volontaire pour éviter de figer trop tôt un format de sauvegarde alors que les phases changent encore le modèle.
+
+Pendant la simulation, un bouton `Save preset` est aussi disponible dans le panneau principal. Il sauvegarde le même preset reproductible de planète que l’écran setup : seed + paramètres de génération uniquement. Il ne sauvegarde pas encore le tick, les espèces ou les populations.
 
 Paramètres modifiables dans le setup :
 

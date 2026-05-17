@@ -1118,6 +1118,7 @@ def test_compact_event_log_click_selects_event_species_and_location():
     viewer.panel_layout_button_rect = pygame.Rect(900, 900, 10, 10)
     viewer.panel_hide_button_rect = pygame.Rect(900, 900, 10, 10)
     viewer.life_tree_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.runtime_save_preset_button_rect = pygame.Rect(900, 900, 10, 10)
     viewer.genealogy_button_rect = pygame.Rect(900, 900, 10, 10)
     viewer.event_log_button_rect = pygame.Rect(900, 900, 10, 10)
     viewer.life_tree_modal_open = False
@@ -1280,6 +1281,24 @@ def test_setup_actions_can_save_and_open_load_modal_without_running_window(tmp_p
     viewer._handle_setup_action("open_load_preset", "")
     assert viewer.load_preset_modal_open is True
 
+
+
+
+def test_runtime_save_preset_button_saves_current_planet_without_running_window(tmp_path, monkeypatch):
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=9798, sea_level=0.57))
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.runtime_status_message = ""
+
+    monkeypatch.setattr("alife.viewer.DEFAULT_PRESET_DIR", tmp_path)
+    viewer._save_current_preset(status_target="runtime")
+
+    presets = list_world_presets(tmp_path, limit=5)
+    assert presets
+    assert "Saved preset" in viewer.runtime_status_message
+    loaded = load_world_preset(presets[0])
+    assert loaded.seed == 9798
+    assert loaded.sea_level == 0.57
 
 def test_load_preset_modal_click_restores_planet_config(tmp_path):
     original = Planet.generate(PlanetConfig(width=32, height=16, seed=9394, sea_level=0.42))
