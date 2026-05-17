@@ -18,12 +18,12 @@ from .life import (
 
 @dataclass
 class Planet:
-    """Generated 2D planet fields for Phase 3.
+    """Generated 2D planet fields for Phase 4.
 
     Field shapes are always (height, width). Values are normalized to [0, 1]
-    except temperature_c. Phase 3 keeps the abiotic dynamics from Phase 2 and
-    adds the first abstract proto-life: rare abiogenesis events, heritable
-    traits, population fields, death, extinction and mutation-driven branching.
+    except temperature_c. Phase 4 keeps proto-life abstract, but adds stronger
+    ecological pressure: local carrying capacity, maintenance consumption,
+    starvation/turnover, dead matter, and more meaningful extinction dynamics.
     """
 
     config: PlanetConfig
@@ -131,6 +131,10 @@ class Planet:
     @property
     def total_biomass(self) -> float:
         return float(self.biomass.sum())
+
+    @property
+    def total_dead_matter(self) -> float:
+        return float(self.dead_matter.sum())
 
     def top_species(self, limit: int = 5) -> list[tuple[LifeSpecies, float]]:
         totals: list[tuple[LifeSpecies, float]] = []
@@ -391,13 +395,35 @@ class Planet:
                 organic_energy = traits.organic_absorption * self.dead_matter
                 energy_gain = photo_energy + chemo_energy + organic_energy
 
+                # Phase 4: life is no longer only "growth minus generic crowding".
+                # Each cell has a rough carrying capacity derived from current
+                # fertility and usable energy. Dense mats in poor cells now crash,
+                # which produces visible dead matter and frees nutrients again.
+                local_capacity = np.clip(
+                    0.02 + 0.72 * self.fertility + 0.26 * energy_gain * habitat_fit,
+                    0.015,
+                    1.0,
+                )
+                over_capacity = np.maximum(0.0, biomass_before - local_capacity)
+
                 growth = traits.reproduction_rate * energy_gain * habitat_fit
                 stress = self.config.life_stress_rate * (1.0 - habitat_fit)
-                crowding = self.config.life_crowding_rate * biomass_before
-                net = growth - traits.metabolism_cost - stress - crowding
+                starvation = np.maximum(0.0, traits.metabolism_cost - 0.55 * energy_gain * habitat_fit)
+                crowding = self.config.life_crowding_rate * over_capacity
+                net = growth - traits.metabolism_cost - stress - starvation - crowding
 
-                multiplier = np.exp(np.clip(net * dt * self.config.life_time_scale, -0.75, 0.55))
+                multiplier = np.exp(np.clip(net * dt * self.config.life_time_scale, -0.95, 0.42))
                 updated = np.clip(pop * multiplier, 0.0, 1.0).astype(np.float32)
+
+                turnover_pressure = np.clip(
+                    0.35 + 2.50 * stress + 2.10 * starvation + 1.40 * crowding,
+                    0.0,
+                    7.0,
+                )
+                turnover_fraction = 1.0 - np.exp(-self.config.life_turnover_rate * dt * turnover_pressure)
+                turnover_deaths = updated * turnover_fraction
+                updated = np.maximum(updated - turnover_deaths, 0.0).astype(np.float32)
+
                 if traits.dispersal > 0.0:
                     updated = _diffuse(
                         updated,
@@ -407,12 +433,14 @@ class Planet:
 
                 deaths = np.maximum(pop - updated, 0.0)
                 growth_amount = np.maximum(updated - pop, 0.0)
-                self.dead_matter += (0.35 * deaths).astype(np.float32)
+                self.dead_matter += (0.42 * deaths + 0.35 * turnover_deaths).astype(np.float32)
 
-                resource_use = self.config.life_resource_consumption_rate * growth_amount
-                self.nutrients -= resource_use * (0.60 * traits.photosynthesis + 0.35 * traits.organic_absorption)
-                self.chemical_energy -= resource_use * (0.85 * traits.chemosynthesis)
-                self.dead_matter -= resource_use * (0.50 * traits.organic_absorption)
+                growth_use = self.config.life_resource_consumption_rate * growth_amount
+                maintenance_use = self.config.life_maintenance_consumption_rate * dt * updated
+                resource_use = growth_use + maintenance_use
+                self.nutrients -= resource_use * (0.62 * traits.photosynthesis + 0.32 * traits.organic_absorption + 0.08)
+                self.chemical_energy -= resource_use * (0.90 * traits.chemosynthesis)
+                self.dead_matter -= resource_use * (0.60 * traits.organic_absorption)
 
                 updated[updated < 1e-5] = 0.0
                 self.populations[index] = np.clip(updated, 0.0, 1.0).astype(np.float32)
@@ -524,6 +552,45 @@ class Planet:
         dominant = np.argmax(active, axis=0).astype(np.int16)
         dominant[self.biomass <= 0.01] = -1
         self.dominant_species_index = dominant
+
+
+    def top_species_near(
+        self,
+        x: int,
+        y: int,
+        *,
+        radius: int = 5,
+        limit: int = 5,
+    ) -> list[tuple[LifeSpecies, float, float]]:
+        """Return top lineages in a local map zone.
+
+        Coordinates are map-style (x, y). The zone wraps horizontally and clips
+        vertically, matching the planet projection. Returned totals are
+        (species, local_total, global_total), sorted by local_total descending.
+        """
+        if not self.species or limit <= 0:
+            return []
+
+        height, width = self.shape
+        cell_x = int(np.clip(x, 0, width - 1))
+        cell_y = int(np.clip(y, 0, height - 1))
+        r = max(0, int(radius))
+        y0 = max(0, cell_y - r)
+        y1 = min(height, cell_y + r + 1)
+        x_indices = np.arange(cell_x - r, cell_x + r + 1) % width
+
+        active = self.populations[: len(self.species)]
+        region = active[:, y0:y1, :][:, :, x_indices]
+        local_totals = region.sum(axis=(1, 2))
+        global_totals = active.sum(axis=(1, 2))
+
+        rows: list[tuple[LifeSpecies, float, float]] = []
+        for index, species in enumerate(self.species):
+            local_total = float(local_totals[index])
+            if local_total > 0.005:
+                rows.append((species, local_total, float(global_totals[index])))
+        rows.sort(key=lambda item: item[1], reverse=True)
+        return rows[:limit]
 
     def species_strategy_label(self, species: LifeSpecies) -> str:
         return infer_strategy_label(species.traits)

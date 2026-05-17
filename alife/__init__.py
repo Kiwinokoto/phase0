@@ -1,4 +1,4 @@
-"""Phase 3 prototype for a dynamic 2D planet with first proto-life."""
+"""Phase 4 prototype for a dynamic 2D planet with constrained proto-ecology."""
 
 from .config import PlanetConfig
 from .life import LifeSpecies, LifeTraits

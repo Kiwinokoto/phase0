@@ -7,9 +7,9 @@ from dataclasses import dataclass
 class PlanetConfig:
     """Configuration for a generated 2D planet.
 
-    Phase 3 adds the first abstract life layer on top of the dynamic abiotic
-    planet: rare abiogenesis events, proto-lineages, population growth,
-    extinction, and light mutation-driven branching.
+    Phase 4 turns the first proto-life into a more constrained ecology:
+    populations consume maintenance resources, produce dead matter through
+    turnover, and are limited by local carrying capacity.
     """
 
     width: int = 256
@@ -59,7 +59,7 @@ class PlanetConfig:
     volcanic_pulse_strength: float = 0.55
 
 
-    # Phase 3 proto-life. Populations are stored per lineage and per map cell;
+    # Phase 4 proto-life. Populations are stored per lineage and per map cell;
     # these are still abstract population fields, not individual organisms.
     max_species: int = 64
     abiogenesis_rate: float = 0.0060
@@ -67,14 +67,16 @@ class PlanetConfig:
     initial_seed_population: float = 0.18
 
     life_time_scale: float = 0.045
-    life_stress_rate: float = 0.09
-    life_crowding_rate: float = 0.30
-    life_resource_consumption_rate: float = 0.003
+    life_stress_rate: float = 0.11
+    life_crowding_rate: float = 0.52
+    life_resource_consumption_rate: float = 0.0045
+    life_maintenance_consumption_rate: float = 0.0016
+    life_turnover_rate: float = 0.0018
     life_dispersal_rate: float = 0.018
 
     dead_matter_diffusion_rate: float = 0.012
-    dead_matter_decay_rate: float = 0.003
-    dead_matter_recycling_rate: float = 0.55
+    dead_matter_decay_rate: float = 0.0018
+    dead_matter_recycling_rate: float = 0.45
 
     speciation_rate: float = 0.000075
     mutation_strength: float = 0.09
@@ -102,5 +104,9 @@ class PlanetConfig:
             raise ValueError("abiogenesis_rate must be >= 0.")
         if not 0.0 <= self.abiogenesis_fertility_threshold <= 1.0:
             raise ValueError("abiogenesis_fertility_threshold must be between 0 and 1.")
+        if self.life_maintenance_consumption_rate < 0.0:
+            raise ValueError("life_maintenance_consumption_rate must be >= 0.")
+        if self.life_turnover_rate < 0.0:
+            raise ValueError("life_turnover_rate must be >= 0.")
         if self.initial_speed < 1:
             raise ValueError("initial_speed must be >= 1.")

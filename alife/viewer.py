@@ -108,7 +108,7 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
     ),
     "dead_matter": LayerLegend(
         title="Dead matter",
-        description=("Recycled biomass from failed", "or dying proto-lineages."),
+        description=("Dead/recycled biomass.", "Auto-scaled so faint debris shows."),
         colors=((20, 16, 12), (115, 76, 38), (225, 170, 80)),
         labels=("none", "debris", "rich"),
     ),
@@ -134,7 +134,7 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
 
 
 class PlanetViewer:
-    """Small Pygame viewer for Phase 3 proto-life maps."""
+    """Small Pygame viewer for Phase 4 constrained proto-ecology maps."""
 
     layers: tuple[LayerName, ...] = (
         "biome",
@@ -155,25 +155,32 @@ class PlanetViewer:
         "dominant_life",
     )
 
-    def __init__(self, planet: Planet, scale: int = 4) -> None:
+    def __init__(self, planet: Planet, scale: int = 4, start_fullscreen: bool = True) -> None:
         pygame.init()
         self.planet = planet
         self.scale = max(1, int(scale))
         self.layer_index = 0
         self.paused = False
-        self.fullscreen = False
+        self.fullscreen = bool(start_fullscreen)
         self.life_overlay_mode: OverlayMode = "biomass"
         self.speed = planet.config.initial_speed
+        self.selected_cell: tuple[int, int] | None = None  # stored as (x, y) map coordinates
+        self.selected_radius = 5
+
         self.font = pygame.font.SysFont("monospace", 16)
+        self.layer_font = pygame.font.SysFont("monospace", 20, bold=True)
         self.small_font = pygame.font.SysFont("monospace", 12)
         self.tiny_font = pygame.font.SysFont("monospace", 11)
 
         height, width = self.planet.shape
         self.base_map_size = (width * self.scale, height * self.scale)
-        self.side_panel_width = 380
+        self.side_panel_width = 410
         self.windowed_size = (self.base_map_size[0] + self.side_panel_width, self.base_map_size[1])
-        self.screen = pygame.display.set_mode(self.windowed_size)
-        pygame.display.set_caption("Artificial Life Sandbox — Phase 3")
+        if self.fullscreen:
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        else:
+            self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
+        pygame.display.set_caption("Artificial Life Sandbox — Phase 4")
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
@@ -221,6 +228,10 @@ class PlanetViewer:
             self._toggle_fullscreen()
         elif self.life_overlay_button_rect.collidepoint(pos):
             self._cycle_life_overlay()
+        elif self.map_rect.collidepoint(pos):
+            cell = self._screen_pos_to_cell(pos)
+            if cell is not None:
+                self.selected_cell = cell
 
     def _handle_key(self, key: int) -> bool:
         if key in (pygame.K_ESCAPE, pygame.K_q):
@@ -243,6 +254,7 @@ class PlanetViewer:
             self._cycle_life_overlay()
         elif key == pygame.K_r:
             self.planet = self.planet.regenerate(seed=random_seed())
+            self.selected_cell = None
             self._invalidate_cache()
         elif key == pygame.K_s:
             self._save_screenshot()
@@ -289,6 +301,7 @@ class PlanetViewer:
     def _draw(self) -> None:
         self.screen.fill((16, 18, 24))
         self.screen.blit(self._get_map_surface(), self.map_rect.topleft)
+        self._draw_selection_marker()
         self._draw_panel()
 
     def _get_map_surface(self) -> pygame.Surface:
@@ -313,100 +326,248 @@ class PlanetViewer:
 
     def _draw_panel(self) -> None:
         panel = self.panel_rect
-        pygame.draw.rect(self.screen, (22, 24, 32), panel)
+        pygame.draw.rect(self.screen, (18, 20, 28), panel)
         pygame.draw.line(self.screen, (70, 76, 96), panel.topleft, panel.bottomleft, 1)
 
         x = panel.left + 18
         y = 18
-        self._draw_text("Phase 3 — First Proto-Life", x, y, self.font, (235, 238, 245))
-        y += 30
+        content_w = panel.width - 36
+
+        self._draw_text("Phase 4 — Constrained Ecology", x, y, self.font, (235, 238, 245))
+        y += 25
+
+        y = self._draw_active_layer_header(x, y)
+        y += 9
 
         y = self._draw_settings_row(x, y)
+        y += 8
+
+        y = self._draw_compact_controls(x, y, content_w)
         y += 10
 
+        y = self._draw_simulation_summary(x, y, content_w)
+        y += 9
+
+        y = self._draw_selected_zone(x, y, content_w)
+        y += 9
+
+        y = self._draw_life_summary(x, y, content_w)
+        y += 9
+
+        # On shorter windows the inspector and life sections matter more than
+        # global planet averages, so keep the lower sections conditional.
+        if y < panel.bottom - 220:
+            y = self._draw_planet_summary(x, y, content_w)
+            y += 9
+
+        if y < panel.bottom - 120:
+            y = self._draw_current_layer_legend(x, y, content_w)
+
+        note_y = max(y + 12, panel.bottom - 44)
         for line in (
-            f"seed: {self.planet.config.seed}",
-            f"tick: {self.planet.tick}",
-            f"speed: x{self.speed}",
-            f"status: {'paused' if self.paused else 'running'}",
-            f"mode: {'fullscreen' if self.fullscreen else 'window'}",
-            f"overlay: {self.life_overlay_mode}",
-            f"layer: {self.current_layer}",
-        ):
-            self._draw_text(line, x, y, self.small_font, (195, 202, 220))
-            y += 15
-
-        y += 8
-        self._draw_text("Controls:", x, y, self.small_font, (235, 238, 245))
-        y += 16
-        for line in (
-            "space pause  |  button fullscreen",
-            "button/o life overlay",
-            "tab/←/→ layer | ↑/↓ speed",
-            "r new seed   |  s screenshot",
-            "q/esc quit",
-        ):
-            self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
-            y += 14
-
-        y += 8
-        self._draw_text("Planet stats:", x, y, self.small_font, (235, 238, 245))
-        y += 16
-        for line in (
-            f"land/ocean: {100.0 * self.planet.land.mean():.1f}% / {100.0 * (1.0 - self.planet.land.mean()):.1f}%",
-            f"temp avg: {self.planet.temperature_c.mean():.1f} °C",
-            f"temp min/max: {self.planet.temperature_c.min():.1f}/{self.planet.temperature_c.max():.1f} °C",
-            f"humidity/light: {self.planet.humidity.mean():.2f} / {self.planet.light.mean():.2f}",
-            f"nutrients/chem: {self.planet.nutrients.mean():.2f} / {self.planet.chemical_energy.mean():.2f}",
-            f"tox/fertility: {self.planet.toxicity.mean():.2f} / {self.planet.fertility.mean():.2f}",
-            f"dead/biomass: {self.planet.dead_matter.mean():.3f} / {self.planet.biomass.mean():.3f}",
-        ):
-            self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
-            y += 14
-
-        y += 8
-        self._draw_text("Life stats:", x, y, self.small_font, (235, 238, 245))
-        y += 16
-        for line in (
-            f"living/extinct: {self.planet.living_species_count} / {self.planet.extinction_count}",
-            f"total biomass: {self.planet.total_biomass:.2f}",
-            f"tracked lineages: {len(self.planet.species)}/{self.planet.config.max_species}",
-        ):
-            self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
-            y += 14
-
-        y = self._draw_top_species(x, y + 4)
-
-        y += 10
-        y = self._draw_current_layer_legend(x, y)
-
-        # Keep the phase note pinned near the bottom when there is enough space.
-        note_y = max(y + 12, panel.bottom - 54)
-        for line in (
-            "Life is still abstract population fields.",
-            "No plants/animals are hard-coded yet.",
+            "Resource-limited proto-ecology.",
+            "No hard-coded plants/animals.",
         ):
             if note_y + 14 < panel.bottom:
                 self._draw_text(line, x, note_y, self.tiny_font, (165, 172, 190))
                 note_y += 14
 
-    def _draw_top_species(self, x: int, y: int) -> int:
-        top = self.planet.top_species(limit=3)
-        if not top:
-            self._draw_text("Top lineages: none yet", x, y, self.tiny_font, (165, 172, 190))
+
+    def _draw_active_layer_header(self, x: int, y: int) -> int:
+        legend = LAYER_LEGENDS[self.current_layer]
+        max_w = self.panel_rect.width - 36
+        rect = pygame.Rect(x, y, max_w, 35)
+        pygame.draw.rect(self.screen, (34, 42, 58), rect, border_radius=8)
+        pygame.draw.rect(self.screen, (92, 112, 150), rect, 1, border_radius=8)
+        self._draw_text(f"Layer: {legend.title}", x + 12, y + 5, self.layer_font, (235, 246, 255))
+        raw = self.tiny_font.render(self.current_layer, True, (160, 174, 200))
+        self.screen.blit(raw, (rect.right - raw.get_width() - 10, y + 18))
+        return y + rect.height
+
+    def _draw_compact_controls(self, x: int, y: int, width: int) -> int:
+        line1 = "click map: inspect zone   |   space: pause"
+        line2 = "tab/←/→: layer   ↑/↓: speed   r: new seed   s: shot"
+        self._draw_text(line1, x, y, self.tiny_font, (176, 184, 204))
+        y += 13
+        self._draw_text(line2, x, y, self.tiny_font, (176, 184, 204))
+        return y + 14
+
+    def _draw_section_title(self, title: str, x: int, y: int, width: int) -> int:
+        rect = pygame.Rect(x, y, width, 22)
+        pygame.draw.rect(self.screen, (28, 33, 46), rect, border_radius=6)
+        pygame.draw.rect(self.screen, (52, 62, 84), rect, 1, border_radius=6)
+        self._draw_text(title, x + 9, y + 3, self.small_font, (232, 238, 250))
+        return y + 28
+
+    def _draw_key_value_grid(
+        self,
+        pairs: tuple[tuple[str, str], ...],
+        x: int,
+        y: int,
+        width: int,
+        *,
+        columns: int = 2,
+        row_h: int = 15,
+    ) -> int:
+        columns = max(1, columns)
+        col_w = max(1, width // columns)
+        for index, (key, value) in enumerate(pairs):
+            col = index % columns
+            row = index // columns
+            sx = x + col * col_w
+            sy = y + row * row_h
+            self._draw_text(f"{key}:", sx, sy, self.tiny_font, (145, 154, 178))
+            value_x = sx + min(82, col_w // 2)
+            max_chars = max(6, (col_w - (value_x - sx)) // 7)
+            self._draw_text(self._clip_text(value, max_chars), value_x, sy, self.tiny_font, (214, 221, 238))
+        rows = (len(pairs) + columns - 1) // columns
+        return y + rows * row_h
+
+    def _clip_text(self, text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 1)] + "…"
+
+    def _draw_simulation_summary(self, x: int, y: int, width: int) -> int:
+        y = self._draw_section_title("Simulation", x, y, width)
+        return self._draw_key_value_grid(
+            (
+                ("seed", str(self.planet.config.seed)),
+                ("tick", str(self.planet.tick)),
+                ("speed", f"x{self.speed}"),
+                ("state", "paused" if self.paused else "running"),
+                ("mode", "fullscreen" if self.fullscreen else "window"),
+                ("life", self.life_overlay_mode),
+            ),
+            x,
+            y,
+            width,
+        )
+
+    def _draw_life_summary(self, x: int, y: int, width: int) -> int:
+        y = self._draw_section_title("Life summary", x, y, width)
+        y = self._draw_key_value_grid(
+            (
+                ("living", f"{self.planet.living_species_count}"),
+                ("extinct", f"{self.planet.extinction_count}"),
+                ("biomass", f"{self.planet.total_biomass:.1f}"),
+                ("dead", f"{self.planet.total_dead_matter:.1f}"),
+                ("lineages", f"{len(self.planet.species)}/{self.planet.config.max_species}"),
+                ("max bio", f"{self.planet.biomass.max():.3f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 4
+        return self._draw_top_species(x, y, width)
+
+    def _draw_planet_summary(self, x: int, y: int, width: int) -> int:
+        y = self._draw_section_title("Planet averages", x, y, width)
+        return self._draw_key_value_grid(
+            (
+                ("land", f"{100.0 * self.planet.land.mean():.1f}%"),
+                ("ocean", f"{100.0 * (1.0 - self.planet.land.mean()):.1f}%"),
+                ("temp", f"{self.planet.temperature_c.mean():.1f} C"),
+                ("range", f"{self.planet.temperature_c.min():.1f}/{self.planet.temperature_c.max():.1f}"),
+                ("humid", f"{self.planet.humidity.mean():.2f}"),
+                ("light", f"{self.planet.light.mean():.2f}"),
+                ("nutr", f"{self.planet.nutrients.mean():.2f}"),
+                ("chem", f"{self.planet.chemical_energy.mean():.2f}"),
+                ("tox", f"{self.planet.toxicity.mean():.2f}"),
+                ("fert", f"{self.planet.fertility.mean():.2f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+
+    def _draw_selected_zone(self, x: int, y: int, width: int) -> int:
+        y = self._draw_section_title("Selected zone", x, y, width)
+
+        if self.selected_cell is None:
+            self._draw_text("Click anywhere on the map to inspect local ecology.", x, y, self.tiny_font, (178, 186, 206))
+            y += 14
+            self._draw_text("This will show local biomass and top lineages.", x, y, self.tiny_font, (145, 154, 178))
+            return y + 17
+
+        cell_x, cell_y = self.selected_cell
+        cell_x = int(np.clip(cell_x, 0, self.planet.config.width - 1))
+        cell_y = int(np.clip(cell_y, 0, self.planet.config.height - 1))
+        self.selected_cell = (cell_x, cell_y)
+
+        y = self._draw_key_value_grid(
+            (
+                ("cell", f"x{cell_x} y{cell_y}"),
+                ("radius", str(self.selected_radius)),
+                ("biomass", f"{self.planet.biomass[cell_y, cell_x]:.3f}"),
+                ("diversity", f"{self.planet.diversity[cell_y, cell_x]:.2f}"),
+                ("fert", f"{self.planet.fertility[cell_y, cell_x]:.2f}"),
+                ("tox", f"{self.planet.toxicity[cell_y, cell_x]:.2f}"),
+                ("dead", f"{self.planet.dead_matter[cell_y, cell_x]:.3f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 4
+
+        local_top = self.planet.top_species_near(cell_x, cell_y, radius=self.selected_radius, limit=4)
+        if not local_top:
+            self._draw_text("Local lineages: none", x, y, self.tiny_font, (145, 154, 178))
             return y + 16
 
-        self._draw_text("Top lineages:", x, y, self.small_font, (235, 238, 245))
-        y += 16
+        self._draw_text("Local top lineages", x, y, self.tiny_font, (220, 226, 240))
+        y += 14
+        for species, local_total, _global_total in local_top:
+            color_rect = pygame.Rect(x, y + 2, 10, 10)
+            pygame.draw.rect(self.screen, species.color, color_rect)
+            pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
+            label = f"{species.name}  {local_total:.2f}  {self.planet.species_strategy_label(species)}"
+            self._draw_text(self._clip_text(label, 48), x + 16, y, self.tiny_font, (190, 199, 218))
+            y += 14
+        return y
+
+    def _screen_pos_to_cell(self, pos: tuple[int, int]) -> tuple[int, int] | None:
+        if not self.map_rect.collidepoint(pos):
+            return None
+        rel_x = (pos[0] - self.map_rect.left) / max(1, self.map_rect.width)
+        rel_y = (pos[1] - self.map_rect.top) / max(1, self.map_rect.height)
+        cell_x = int(np.clip(rel_x * self.planet.config.width, 0, self.planet.config.width - 1))
+        cell_y = int(np.clip(rel_y * self.planet.config.height, 0, self.planet.config.height - 1))
+        return (cell_x, cell_y)
+
+    def _draw_selection_marker(self) -> None:
+        if self.selected_cell is None:
+            return
+        cell_x, cell_y = self.selected_cell
+        width = self.planet.config.width
+        height = self.planet.config.height
+        px = self.map_rect.left + int((cell_x / width) * self.map_rect.width)
+        py = self.map_rect.top + int((cell_y / height) * self.map_rect.height)
+        cell_w = max(2, int(np.ceil(self.map_rect.width / width)))
+        cell_h = max(2, int(np.ceil(self.map_rect.height / height)))
+        radius_px = max(8, int(self.selected_radius * (self.map_rect.width / width)))
+        center = (px + cell_w // 2, py + cell_h // 2)
+        pygame.draw.circle(self.screen, (245, 245, 235), center, radius_px, 1)
+        pygame.draw.line(self.screen, (245, 245, 235), (center[0] - radius_px - 3, center[1]), (center[0] + radius_px + 3, center[1]), 1)
+        pygame.draw.line(self.screen, (245, 245, 235), (center[0], center[1] - radius_px - 3), (center[0], center[1] + radius_px + 3), 1)
+
+    def _draw_top_species(self, x: int, y: int, width: int) -> int:
+        top = self.planet.top_species(limit=3)
+        if not top:
+            self._draw_text("Global top lineages: none yet", x, y, self.tiny_font, (145, 154, 178))
+            return y + 16
+
+        self._draw_text("Global top lineages", x, y, self.tiny_font, (220, 226, 240))
+        y += 14
         for species, total in top:
             color_rect = pygame.Rect(x, y + 2, 10, 10)
             pygame.draw.rect(self.screen, species.color, color_rect)
             pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
             status = "†" if species.is_extinct else ""
-            label = f"{species.name}{status} {total:.1f} {self.planet.species_strategy_label(species)}"
-            if len(label) > 43:
-                label = label[:40] + "..."
-            self._draw_text(label, x + 16, y, self.tiny_font, (185, 192, 210))
+            label = f"{species.name}{status}  {total:.1f}  {self.planet.species_strategy_label(species)}"
+            self._draw_text(self._clip_text(label, 48), x + 16, y, self.tiny_font, (190, 199, 218))
             y += 14
         return y
 
@@ -439,16 +600,15 @@ class PlanetViewer:
         )
         self.screen.blit(text, text_pos)
 
-    def _draw_current_layer_legend(self, x: int, y: int) -> int:
+    def _draw_current_layer_legend(self, x: int, y: int, width: int | None = None) -> int:
         legend = LAYER_LEGENDS[self.current_layer]
-        max_bar_w = max(140, self.panel_rect.width - 44)
+        max_bar_w = width if width is not None else max(140, self.panel_rect.width - 44)
 
-        self._draw_text("Layer legend:", x, y, self.small_font, (235, 238, 245))
-        y += 17
+        y = self._draw_section_title("Layer legend", x, y, max_bar_w)
         self._draw_text(legend.title, x, y, self.small_font, (220, 226, 240))
         y += 16
         for line in legend.description:
-            self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
+            self._draw_text(line, x, y, self.tiny_font, (178, 186, 206))
             y += 13
 
         if self._should_apply_life_overlay(self.current_layer, self.life_overlay_mode):
@@ -602,7 +762,7 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
     if layer == "fertility":
         return _three_color_gradient(planet.fertility, (28, 22, 18), (65, 120, 68), (165, 220, 92))
     if layer == "dead_matter":
-        return _three_color_gradient(planet.dead_matter, (20, 16, 12), (115, 76, 38), (225, 170, 80))
+        return _render_dead_matter(planet)
     if layer == "biomass":
         return _three_color_gradient(planet.biomass, (10, 14, 12), (35, 130, 65), (180, 245, 120))
     if layer == "diversity":
@@ -610,6 +770,20 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
     if layer == "dominant_life":
         return _render_dominant_life(planet)
     raise ValueError(f"Unknown layer: {layer}")
+
+def _render_dead_matter(planet: Planet) -> np.ndarray:
+    # Dead matter is usually a thinner field than living biomass. The simulation
+    # keeps raw values in [0, 1], but this view stretches current non-zero debris
+    # so crashes/turnover are readable instead of almost black.
+    field = np.clip(planet.dead_matter, 0.0, 1.0)
+    if float(field.max()) <= 1e-7:
+        return _three_color_gradient(field, (20, 16, 12), (115, 76, 38), (225, 170, 80))
+    nonzero = field[field > 1e-7]
+    scale = float(np.quantile(nonzero, 0.98)) if nonzero.size else float(field.max())
+    scale = max(scale, 0.025)
+    visible = np.clip(field / scale, 0.0, 1.0)
+    return _three_color_gradient(visible, (20, 16, 12), (115, 76, 38), (225, 170, 80))
+
 
 def _render_dominant_life(planet: Planet) -> np.ndarray:
     h, w = planet.shape
@@ -694,7 +868,7 @@ def random_seed() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 3")
+    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 4")
     parser.add_argument(
         "--seed",
         type=int,
@@ -705,6 +879,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--scale", type=int, default=4)
     parser.add_argument("--sea-level", type=float, default=0.50)
+    parser.add_argument(
+        "--windowed",
+        action="store_true",
+        help="Start in a resizable window instead of fullscreen.",
+    )
     return parser.parse_args()
 
 
@@ -716,7 +895,7 @@ def main() -> None:
         height=args.height,
         sea_level=args.sea_level,
     )
-    viewer = PlanetViewer(Planet.generate(config), scale=args.scale)
+    viewer = PlanetViewer(Planet.generate(config), scale=args.scale, start_fullscreen=not args.windowed)
     viewer.run()
 
 

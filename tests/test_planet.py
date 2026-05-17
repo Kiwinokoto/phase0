@@ -290,3 +290,76 @@ def test_life_overlay_does_not_modify_dedicated_life_layers():
     overlay = render_layer(planet, "biomass", overlay_mode="dominant")
 
     np.testing.assert_array_equal(plain, overlay)
+
+
+def test_phase4_dead_matter_accumulates_after_life_turnover():
+    config = PlanetConfig(
+        width=96,
+        height=48,
+        seed=1415,
+        abiogenesis_rate=0.12,
+        abiogenesis_fertility_threshold=0.28,
+    )
+    planet = Planet.generate(config)
+    for _ in range(8):
+        planet.step(600)
+
+    assert planet.total_biomass > 0.0
+    assert planet.total_dead_matter > 0.0
+    assert float(planet.dead_matter.max()) > 0.0
+
+
+def test_phase4_hostile_pressure_can_reduce_existing_biomass():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=1516,
+        abiogenesis_rate=0.25,
+        abiogenesis_fertility_threshold=0.20,
+    )
+    planet = Planet.generate(config)
+    planet.step(700)
+    before = planet.total_biomass
+
+    # Directly simulate a severe environmental shock. This uses the model state,
+    # not a public gameplay event yet; future phases can expose it as disasters.
+    planet.toxicity.fill(1.0)
+    planet.temperature_c.fill(75.0)
+    planet._update_life(350)
+    planet._update_biomass_maps()
+
+    assert before > 0.0
+    assert planet.total_biomass < before
+    assert planet.total_dead_matter > 0.0
+
+
+def test_dead_matter_render_becomes_visible_for_small_nonzero_values():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=1617))
+    planet.dead_matter[4:8, 10:14] = 0.015
+
+    rgb = render_layer(planet, "dead_matter")
+
+    assert rgb.shape == (16, 32, 3)
+    assert rgb[5, 11].mean() > rgb[0, 0].mean()
+
+
+def test_top_species_near_returns_local_lineages_sorted():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=1718,
+        abiogenesis_rate=0.25,
+        abiogenesis_fertility_threshold=0.20,
+    )
+    planet = Planet.generate(config)
+    planet.step(900)
+    assert planet.species
+
+    y, x = np.unravel_index(np.argmax(planet.biomass), planet.biomass.shape)
+    local = planet.top_species_near(int(x), int(y), radius=5, limit=4)
+
+    assert local
+    assert len(local) <= 4
+    assert all(local[i][1] >= local[i + 1][1] for i in range(len(local) - 1))
+    assert all(local_total > 0.0 for _species, local_total, _global_total in local)
+    assert all(global_total >= local_total for _species, local_total, global_total in local)
