@@ -2,6 +2,6 @@
 
 from .config import PlanetConfig
 from .life import LifeSpecies, LifeTraits
-from .planet import Planet
+from .planet import LineageHabitatSummary, Planet
 
-__all__ = ["PlanetConfig", "Planet", "LifeSpecies", "LifeTraits"]
+__all__ = ["PlanetConfig", "Planet", "LineageHabitatSummary", "LifeSpecies", "LifeTraits"]

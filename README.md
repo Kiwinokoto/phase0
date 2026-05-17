@@ -4,6 +4,47 @@ Prototype Python minimal pour générer et observer une planète 2D avec proto-v
 
 Phase 4 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle renforce plutôt le moteur d'évolution : la vie consomme des ressources pour croître et se maintenir, produit de la matière morte, subit la surpopulation locale, peut stagner, s'effondrer ou s'éteindre.
 
+
+## Écran d’accueil / setup planète
+
+Le viewer démarre maintenant sur un écran de préparation avant de lancer la simulation.
+
+À ce stade, la planète est déjà générée et visible à gauche, mais le temps ne tourne pas encore. Le panneau de droite affiche seulement les contrôles essentiels :
+
+```text
+- bouton Window / Fullscreen
+- seed utilisée
+- statistiques résultantes de la planète générée
+- paramètres modifiables de génération
+- bouton Start simulation en bas
+```
+
+Les boutons `+` / `-` modifient immédiatement la planète prévisualisée. Chaque paramètre a aussi une barre colorée : clique ou glisse directement sur la barre pour régler rapidement la valeur entre son minimum et son maximum. Le bouton `Random` choisit une nouvelle seed.
+
+Paramètres modifiables dans le setup :
+
+```text
+sea level
+continent scale
+detail octaves
+detail gain
+volcanism
+equator temperature
+pole temperature
+```
+
+Quand la planète te plaît, clique `Start simulation` ou appuie sur `Enter` / `Space`.
+
+Raccourcis utiles pendant le setup :
+
+```text
+Enter/Space   lancer la simulation
+r             seed aléatoire
+f/F11         plein écran / fenêtre
+s             screenshot
+q/esc         quitter
+```
+
 ## Installation / lancement rapide
 
 ```bash
@@ -28,7 +69,7 @@ python run.py --seed 123 --width 320 --height 160 --scale 4 --sea-level 0.52
 Par défaut, `python run.py` et `./run.sh` génèrent une seed aléatoire.
 Utilise `--seed 123` seulement quand tu veux reproduire exactement la même planète.
 
-## Contrôles
+## Contrôles après Start
 
 ```text
 space  pause/reprise
@@ -181,16 +222,64 @@ Click anywhere on the map to select a local zone. The right panel shows local bi
 
 ## Phase 4 right-panel readability patch
 
-The right panel is now grouped by priority instead of being one long list:
+The right panel is now grouped from general to particular instead of being one long list:
 
 ```text
 1. Active layer
 2. Main buttons and compact controls
 3. Simulation status
-4. Selected zone inspector
+4. Planet averages
 5. Life summary and global top lineages
-6. Planet averages
-7. Current layer legend
+6. Selected zone inspector
+7. Selected lineage / habitat card
+8. Current layer legend, pinned near the bottom
 ```
 
-The selected zone inspector is intentionally placed high in the panel because it will remain useful in later phases when there are more lineages, strategies and signals to track.
+Runtime sections are collapsible: click a section header to fold or unfold it. This keeps the panel usable as more ecology and lineage data is added. The legend stays available near the bottom because it explains the currently visible layer.
+
+## Phase 4 species cards patch
+
+The local and global lineage rows are now clickable.
+
+Recommended observation flow:
+
+```text
+1. click a living zone on the map
+2. inspect the local top lineages in the right panel
+3. click one lineage row
+4. read the selected lineage card
+5. follow its highlighted distribution on the map
+```
+
+The selected lineage card shows:
+
+```text
+- name, strategy label and color
+- living/extinct status
+- age, parent and descendant count
+- current biomass and historical peak
+- occupied cells and strongest cell
+- habitat summary: temperature, water access, fertility, toxicity, nutrients, chemical energy, dead matter and light
+- core traits: photosynthesis, chemosynthesis, detritus absorption, dispersal, toxicity tolerance, mutation rate, temperature optimum/tolerance
+```
+
+This is still observational UI only: selecting or highlighting a lineage does not affect the simulation.
+
+
+## Phase 4 setup screen patch
+
+The app now opens on a planet setup screen instead of immediately starting the simulation. The generated planet is visible as before, but the right panel is simplified until `Start simulation` is pressed.
+
+This keeps the later ecology UI uncluttered while allowing quick world iteration: seed, sea level, continent scale, terrain detail, volcanism and temperature bounds regenerate the preview immediately.
+
+## Phase 4 setup sliders / collapsible panel patch
+
+The setup screen now exposes planet parameters as direct manipulation sliders. Click or drag a colored bar to regenerate the preview immediately. The old `+` / `-` buttons are still present for precise nudges.
+
+After `Start simulation`, the right panel is ordered from general to particular:
+
+```text
+Simulation → Planet averages → Life summary → Selected zone → Selected lineage / habitat
+```
+
+Click any section header to collapse or expand it. The layer legend remains pinned near the bottom of the panel so it does not get buried behind lineage details.

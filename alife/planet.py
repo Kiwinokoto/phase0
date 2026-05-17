@@ -16,6 +16,31 @@ from .life import (
 )
 
 
+
+
+@dataclass(frozen=True)
+class LineageHabitatSummary:
+    """Computed observation data for one lineage.
+
+    This is viewer/support data only: it does not affect simulation dynamics.
+    Values are population-weighted over currently occupied cells.
+    """
+
+    species_id: int
+    total_population: float
+    occupied_cells: int
+    strongest_cell: tuple[int, int] | None
+    main_habitat: str
+    mean_temperature_c: float
+    mean_water_access: float
+    mean_fertility: float
+    mean_toxicity: float
+    mean_nutrients: float
+    mean_chemical_energy: float
+    mean_dead_matter: float
+    mean_light: float
+    land_share: float
+
 @dataclass
 class Planet:
     """Generated 2D planet fields for Phase 4.
@@ -144,6 +169,99 @@ class Planet:
                 totals.append((species, total))
         totals.sort(key=lambda item: item[1], reverse=True)
         return totals[: max(0, limit)]
+
+    def species_index_by_id(self, species_id: int) -> int | None:
+        """Return the internal array index for a public lineage id."""
+        for index, species in enumerate(self.species):
+            if species.id == species_id:
+                return index
+        return None
+
+    def species_by_id(self, species_id: int | None) -> LifeSpecies | None:
+        """Return a lineage by id, or None when it no longer belongs to this planet."""
+        if species_id is None:
+            return None
+        index = self.species_index_by_id(int(species_id))
+        return None if index is None else self.species[index]
+
+    def species_total_population(self, species_id: int) -> float:
+        index = self.species_index_by_id(species_id)
+        if index is None:
+            return 0.0
+        return float(self.populations[index].sum())
+
+    def descendant_count(self, species_id: int) -> int:
+        """Return the number of direct and indirect descendant lineages."""
+        descendants = 0
+        frontier = {int(species_id)}
+        seen: set[int] = set()
+        while frontier:
+            parent_id = frontier.pop()
+            if parent_id in seen:
+                continue
+            seen.add(parent_id)
+            children = {species.id for species in self.species if species.parent_id == parent_id}
+            descendants += len(children)
+            frontier.update(children)
+        return descendants
+
+    def lineage_habitat_summary(self, species_id: int, threshold: float = 0.005) -> LineageHabitatSummary:
+        """Compute a compact habitat card for a lineage.
+
+        The summary is based on current population distribution. It intentionally
+        remains observational: it should help the user understand why a lineage
+        is succeeding without feeding back into the simulation.
+        """
+        index = self.species_index_by_id(species_id)
+        if index is None:
+            return _empty_habitat_summary(int(species_id))
+
+        pop = np.clip(self.populations[index], 0.0, None).astype(np.float64)
+        total = float(pop.sum())
+        occupied = pop > max(0.0, float(threshold))
+        occupied_cells = int(occupied.sum())
+        if total <= 1e-12 or occupied_cells == 0:
+            return _empty_habitat_summary(int(species_id), total_population=total)
+
+        strongest_flat = int(np.argmax(pop))
+        strongest_y, strongest_x = divmod(strongest_flat, self.config.width)
+
+        def weighted_mean(values: np.ndarray) -> float:
+            return float((values.astype(np.float64) * pop).sum() / total)
+
+        water_access = self._water_access()
+        land_share = float((self.land.astype(np.float64) * pop).sum() / total)
+        mean_temperature = weighted_mean(self.temperature_c)
+        mean_water_access = weighted_mean(water_access)
+        mean_fertility = weighted_mean(self.fertility)
+        mean_toxicity = weighted_mean(self.toxicity)
+        mean_nutrients = weighted_mean(self.nutrients)
+        mean_chemical_energy = weighted_mean(self.chemical_energy)
+        mean_dead_matter = weighted_mean(self.dead_matter)
+        mean_light = weighted_mean(self.light)
+        main_habitat = _infer_habitat_label(
+            land_share=land_share,
+            mean_temperature_c=mean_temperature,
+            mean_water_access=mean_water_access,
+            mean_fertility=mean_fertility,
+        )
+
+        return LineageHabitatSummary(
+            species_id=int(species_id),
+            total_population=total,
+            occupied_cells=occupied_cells,
+            strongest_cell=(int(strongest_x), int(strongest_y)),
+            main_habitat=main_habitat,
+            mean_temperature_c=mean_temperature,
+            mean_water_access=mean_water_access,
+            mean_fertility=mean_fertility,
+            mean_toxicity=mean_toxicity,
+            mean_nutrients=mean_nutrients,
+            mean_chemical_energy=mean_chemical_energy,
+            mean_dead_matter=mean_dead_matter,
+            mean_light=mean_light,
+            land_share=land_share,
+        )
 
     def step(self, steps: int = 1) -> None:
         """Advance abiotic and proto-life dynamics by `steps` simulation ticks.
@@ -594,6 +712,51 @@ class Planet:
 
     def species_strategy_label(self, species: LifeSpecies) -> str:
         return infer_strategy_label(species.traits)
+
+
+
+
+def _empty_habitat_summary(species_id: int, total_population: float = 0.0) -> LineageHabitatSummary:
+    return LineageHabitatSummary(
+        species_id=int(species_id),
+        total_population=float(total_population),
+        occupied_cells=0,
+        strongest_cell=None,
+        main_habitat="none",
+        mean_temperature_c=0.0,
+        mean_water_access=0.0,
+        mean_fertility=0.0,
+        mean_toxicity=0.0,
+        mean_nutrients=0.0,
+        mean_chemical_energy=0.0,
+        mean_dead_matter=0.0,
+        mean_light=0.0,
+        land_share=0.0,
+    )
+
+
+def _infer_habitat_label(
+    *,
+    land_share: float,
+    mean_temperature_c: float,
+    mean_water_access: float,
+    mean_fertility: float,
+) -> str:
+    if land_share < 0.25:
+        if mean_temperature_c < 2.0:
+            return "cold ocean"
+        if mean_fertility >= 0.55:
+            return "fertile water"
+        return "open water"
+    if land_share < 0.75:
+        return "coastal mix"
+    if mean_temperature_c < 0.0:
+        return "cold land"
+    if mean_water_access < 0.28:
+        return "dry land"
+    if mean_water_access > 0.64:
+        return "wet land"
+    return "temperate land"
 
 
 def _generate_elevation(config: PlanetConfig, rng: np.random.Generator) -> np.ndarray:

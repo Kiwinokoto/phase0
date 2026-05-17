@@ -1,7 +1,7 @@
 import numpy as np
 
 from alife import Planet, PlanetConfig
-from alife.viewer import render_layer, should_apply_life_overlay
+from alife.viewer import PLANET_SETUP_FIELDS, render_layer, should_apply_life_overlay
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -363,3 +363,83 @@ def test_top_species_near_returns_local_lineages_sorted():
     assert all(local[i][1] >= local[i + 1][1] for i in range(len(local) - 1))
     assert all(local_total > 0.0 for _species, local_total, _global_total in local)
     assert all(global_total >= local_total for _species, local_total, global_total in local)
+
+
+def test_lineage_lookup_and_descendant_count_are_available():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=1819,
+        abiogenesis_rate=0.30,
+        abiogenesis_fertility_threshold=0.18,
+        speciation_rate=0.0020,
+    )
+    planet = Planet.generate(config)
+    for _ in range(6):
+        planet.step(600)
+    assert planet.species
+
+    first = planet.species[0]
+    assert planet.species_by_id(first.id) is first
+    assert planet.species_index_by_id(first.id) == 0
+    assert planet.species_total_population(first.id) >= 0.0
+    assert planet.descendant_count(first.id) >= 0
+    assert planet.species_by_id(999999) is None
+    assert planet.species_index_by_id(999999) is None
+
+
+def test_lineage_habitat_summary_describes_current_distribution():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=1920,
+        abiogenesis_rate=0.30,
+        abiogenesis_fertility_threshold=0.18,
+    )
+    planet = Planet.generate(config)
+    planet.step(900)
+    assert planet.species
+
+    species, _total = planet.top_species(limit=1)[0]
+    summary = planet.lineage_habitat_summary(species.id)
+
+    assert summary.species_id == species.id
+    assert summary.total_population > 0.0
+    assert summary.occupied_cells > 0
+    assert summary.strongest_cell is not None
+    sx, sy = summary.strongest_cell
+    assert 0 <= sx < planet.config.width
+    assert 0 <= sy < planet.config.height
+    assert 0.0 <= summary.mean_water_access <= 1.0
+    assert 0.0 <= summary.mean_fertility <= 1.0
+    assert 0.0 <= summary.mean_toxicity <= 1.0
+    assert summary.main_habitat != "none"
+
+
+def test_habitat_summary_for_missing_lineage_is_empty():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=2021))
+    summary = planet.lineage_habitat_summary(123456)
+
+    assert summary.species_id == 123456
+    assert summary.total_population == 0.0
+    assert summary.occupied_cells == 0
+    assert summary.strongest_cell is None
+    assert summary.main_habitat == "none"
+
+
+def test_setup_fields_target_valid_planet_config_values():
+    config = PlanetConfig()
+    keys = {field.key for field in PLANET_SETUP_FIELDS}
+
+    assert "sea_level" in keys
+    assert "volcanic_activity_fraction" in keys
+    assert "equator_temperature_c" in keys
+
+    for field in PLANET_SETUP_FIELDS:
+        value = getattr(config, field.key)
+        assert field.minimum <= float(value) <= field.maximum
+        assert field.format_value(value)
+        assert len(field.low_color) == 3
+        assert len(field.high_color) == 3
+        assert all(0 <= channel <= 255 for channel in (*field.low_color, *field.high_color))
+

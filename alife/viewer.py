@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pygame
@@ -16,6 +16,34 @@ Color = tuple[int, int, int]
 
 LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life")
 LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
+
+
+@dataclass(frozen=True)
+class SetupField:
+    key: str
+    label: str
+    step: float
+    minimum: float
+    maximum: float
+    decimals: int = 2
+    low_color: Color = (52, 64, 88)
+    high_color: Color = (120, 185, 150)
+
+    def format_value(self, value: object) -> str:
+        if self.decimals == 0:
+            return str(int(round(float(value))))
+        return f"{float(value):.{self.decimals}f}"
+
+
+PLANET_SETUP_FIELDS: tuple[SetupField, ...] = (
+    SetupField("sea_level", "Sea level", 0.02, 0.34, 0.68, 2, (82, 132, 76), (52, 132, 205)),
+    SetupField("continent_scale", "Continent scale", 1.0, 2.0, 9.0, 0, (70, 58, 48), (210, 180, 104)),
+    SetupField("detail_octaves", "Detail octaves", 1.0, 1.0, 7.0, 0, (60, 66, 80), (205, 212, 198)),
+    SetupField("detail_gain", "Detail gain", 0.03, 0.35, 0.72, 2, (72, 60, 50), (220, 205, 132)),
+    SetupField("volcanic_activity_fraction", "Volcanism", 0.01, 0.01, 0.24, 2, (62, 42, 76), (255, 116, 45)),
+    SetupField("equator_temperature_c", "Equator temp", 1.0, 8.0, 48.0, 0, (60, 86, 170), (210, 72, 46)),
+    SetupField("pole_temperature_c", "Pole temp", 1.0, -45.0, 8.0, 0, (35, 70, 155), (215, 230, 238)),
+)
 
 
 @dataclass(frozen=True)
@@ -161,11 +189,19 @@ class PlanetViewer:
         self.scale = max(1, int(scale))
         self.layer_index = 0
         self.paused = False
+        self.in_setup_screen = True
         self.fullscreen = bool(start_fullscreen)
         self.life_overlay_mode: OverlayMode = "biomass"
         self.speed = planet.config.initial_speed
         self.selected_cell: tuple[int, int] | None = None  # stored as (x, y) map coordinates
+        self.selected_species_id: int | None = None
         self.selected_radius = 5
+        self.species_row_rects: list[tuple[pygame.Rect, int]] = []
+        self.setup_control_rects: list[tuple[pygame.Rect, str, str]] = []
+        self.setup_slider_rects: list[tuple[pygame.Rect, str]] = []
+        self.active_setup_slider: tuple[str, pygame.Rect] | None = None
+        self.section_header_rects: list[tuple[pygame.Rect, str]] = []
+        self.collapsed_sections: set[str] = set()
 
         self.font = pygame.font.SysFont("monospace", 16)
         self.layer_font = pygame.font.SysFont("monospace", 20, bold=True)
@@ -207,13 +243,18 @@ class PlanetViewer:
                     running = self._handle_key(event.key)
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self._handle_mouse_click(event.pos)
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.active_setup_slider = None
+                elif event.type == pygame.MOUSEMOTION and self.active_setup_slider is not None:
+                    field_key, rect = self.active_setup_slider
+                    self._set_setup_field_from_slider(field_key, event.pos[0], rect)
                 elif event.type == pygame.VIDEORESIZE and not self.fullscreen:
                     self.screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
                     self.windowed_size = self.screen.get_size()
                     self._update_layout()
                     self._invalidate_cache()
 
-            if not self.paused:
+            if not self.in_setup_screen and not self.paused:
                 self.planet.step(self.speed)
                 self._invalidate_cache()
 
@@ -226,9 +267,35 @@ class PlanetViewer:
     def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
         if self.fullscreen_button_rect.collidepoint(pos):
             self._toggle_fullscreen()
-        elif self.life_overlay_button_rect.collidepoint(pos):
+            return
+
+        if self.in_setup_screen:
+            for rect, field_key in self.setup_slider_rects:
+                if rect.collidepoint(pos):
+                    self.active_setup_slider = (field_key, rect)
+                    self._set_setup_field_from_slider(field_key, pos[0], rect)
+                    return
+            for rect, action, key in self.setup_control_rects:
+                if rect.collidepoint(pos):
+                    self._handle_setup_action(action, key)
+                    return
+            return
+
+        if self.life_overlay_button_rect.collidepoint(pos):
             self._cycle_life_overlay()
-        elif self.map_rect.collidepoint(pos):
+            return
+
+        for rect, section_key in self.section_header_rects:
+            if rect.collidepoint(pos):
+                self._toggle_section(section_key)
+                return
+
+        for rect, species_id in self.species_row_rects:
+            if rect.collidepoint(pos):
+                self.selected_species_id = species_id
+                return
+
+        if self.map_rect.collidepoint(pos):
             cell = self._screen_pos_to_cell(pos)
             if cell is not None:
                 self.selected_cell = cell
@@ -236,6 +303,16 @@ class PlanetViewer:
     def _handle_key(self, key: int) -> bool:
         if key in (pygame.K_ESCAPE, pygame.K_q):
             return False
+        if self.in_setup_screen:
+            if key in (pygame.K_f, pygame.K_F11):
+                self._toggle_fullscreen()
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                self._start_simulation()
+            elif key == pygame.K_r:
+                self._randomize_setup_seed()
+            elif key == pygame.K_s:
+                self._save_screenshot()
+            return True
         if key == pygame.K_SPACE:
             self.paused = not self.paused
         elif key in (pygame.K_TAB, pygame.K_RIGHT):
@@ -255,6 +332,7 @@ class PlanetViewer:
         elif key == pygame.K_r:
             self.planet = self.planet.regenerate(seed=random_seed())
             self.selected_cell = None
+            self.selected_species_id = None
             self._invalidate_cache()
         elif key == pygame.K_s:
             self._save_screenshot()
@@ -301,25 +379,29 @@ class PlanetViewer:
     def _draw(self) -> None:
         self.screen.fill((16, 18, 24))
         self.screen.blit(self._get_map_surface(), self.map_rect.topleft)
-        self._draw_selection_marker()
+        if not self.in_setup_screen:
+            self._draw_selected_species_distribution()
+            self._draw_selection_marker()
         self._draw_panel()
 
     def _get_map_surface(self) -> pygame.Surface:
+        layer = "biome" if self.in_setup_screen else self.current_layer
+        overlay_mode = "off" if self.in_setup_screen else self.life_overlay_mode
         if (
-            self.cached_layer == self.current_layer
-            and self.cached_overlay_mode == self.life_overlay_mode
+            self.cached_layer == layer
+            and self.cached_overlay_mode == overlay_mode
             and self.cached_surface is not None
             and self.cached_surface_size == self.map_rect.size
         ):
             return self.cached_surface
 
-        rgb = render_layer(self.planet, self.current_layer, overlay_mode=self.life_overlay_mode)
+        rgb = render_layer(self.planet, layer, overlay_mode=overlay_mode)
         surface = pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
         if surface.get_size() != self.map_rect.size:
             surface = pygame.transform.scale(surface, self.map_rect.size)
 
-        self.cached_layer = self.current_layer
-        self.cached_overlay_mode = self.life_overlay_mode
+        self.cached_layer = layer
+        self.cached_overlay_mode = overlay_mode
         self.cached_surface = surface
         self.cached_surface_size = self.map_rect.size
         return surface
@@ -329,9 +411,18 @@ class PlanetViewer:
         pygame.draw.rect(self.screen, (18, 20, 28), panel)
         pygame.draw.line(self.screen, (70, 76, 96), panel.topleft, panel.bottomleft, 1)
 
+        self.species_row_rects = []
+        self.setup_control_rects = []
+        self.setup_slider_rects = []
+        self.section_header_rects = []
+
         x = panel.left + 18
         y = 18
         content_w = panel.width - 36
+
+        if self.in_setup_screen:
+            self._draw_setup_panel(x, y, content_w)
+            return
 
         self._draw_text("Phase 4 — Constrained Ecology", x, y, self.font, (235, 238, 245))
         y += 25
@@ -345,33 +436,208 @@ class PlanetViewer:
         y = self._draw_compact_controls(x, y, content_w)
         y += 10
 
-        y = self._draw_simulation_summary(x, y, content_w)
-        y += 9
+        legend_y = max(y + 250, panel.bottom - 178)
+        section_limit = legend_y - 10
 
-        y = self._draw_selected_zone(x, y, content_w)
-        y += 9
-
-        y = self._draw_life_summary(x, y, content_w)
-        y += 9
-
-        # On shorter windows the inspector and life sections matter more than
-        # global planet averages, so keep the lower sections conditional.
-        if y < panel.bottom - 220:
-            y = self._draw_planet_summary(x, y, content_w)
-            y += 9
-
-        if y < panel.bottom - 120:
-            y = self._draw_current_layer_legend(x, y, content_w)
-
-        note_y = max(y + 12, panel.bottom - 44)
-        for line in (
-            "Resource-limited proto-ecology.",
-            "No hard-coded plants/animals.",
+        for draw_section in (
+            self._draw_simulation_summary,
+            self._draw_planet_summary,
+            self._draw_life_summary,
+            self._draw_selected_zone,
+            self._draw_selected_lineage,
         ):
-            if note_y + 14 < panel.bottom:
-                self._draw_text(line, x, note_y, self.tiny_font, (165, 172, 190))
-                note_y += 14
+            if y > section_limit - 34:
+                self._draw_text("Collapse sections above to reveal more details.", x, y, self.tiny_font, (190, 170, 130))
+                y += 16
+                break
+            y = draw_section(x, y, content_w)
+            y += 8
 
+        self._draw_current_layer_legend(x, legend_y, content_w)
+
+
+    def _draw_setup_panel(self, x: int, y: int, width: int) -> None:
+        self._draw_text("Artificial Life Sandbox", x, y, self.font, (235, 238, 245))
+        y += 24
+        self._draw_text("Planet setup — preview before simulation", x, y, self.tiny_font, (165, 174, 196))
+        y += 24
+
+        button_h = 28
+        fullscreen_label = "Window" if self.fullscreen else "Fullscreen"
+        self.fullscreen_button_rect = pygame.Rect(x, y, min(170, width), button_h)
+        self._draw_button(self.fullscreen_button_rect, fullscreen_label)
+        y += button_h + 12
+
+        y = self._draw_section_title("Generated planet", x, y, width)
+        y = self._draw_key_value_grid(
+            (
+                ("seed", str(self.planet.config.seed)),
+                ("size", f"{self.planet.config.width}x{self.planet.config.height}"),
+                ("land", f"{100.0 * self.planet.land.mean():.1f}%"),
+                ("ocean", f"{100.0 * (1.0 - self.planet.land.mean()):.1f}%"),
+                ("temp avg", f"{self.planet.temperature_c.mean():.1f} C"),
+                ("temp range", f"{self.planet.temperature_c.min():.1f}/{self.planet.temperature_c.max():.1f}"),
+                ("humidity", f"{self.planet.humidity.mean():.2f}"),
+                ("fertility", f"{self.planet.fertility.mean():.2f}"),
+                ("nutrients", f"{self.planet.nutrients.mean():.2f}"),
+                ("volcanism", f"{self.planet.volcanism.mean():.2f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 12
+
+        y = self._draw_section_title("Seed", x, y, width)
+        y = self._draw_seed_setup_row(x, y, width)
+        y += 8
+
+        y = self._draw_section_title("Planet parameters", x, y, width)
+        for field in PLANET_SETUP_FIELDS:
+            if y > self.panel_rect.bottom - 72:
+                self._draw_text("Panel too short: resize or use fullscreen.", x, y, self.tiny_font, (190, 170, 130))
+                break
+            y = self._draw_setup_field_row(field, x, y, width)
+
+        hint_y = max(y + 12, self.panel_rect.bottom - 98)
+        for line in ("Changes regenerate the preview immediately.", "Enter/Space starts.  R chooses a random seed."):
+            if hint_y + 14 < self.panel_rect.bottom - 48:
+                self._draw_text(line, x, hint_y, self.tiny_font, (150, 160, 184))
+                hint_y += 14
+
+        start_rect = pygame.Rect(x, self.panel_rect.bottom - 42, width, 30)
+        self.setup_control_rects.append((start_rect, "start", ""))
+        self._draw_button(start_rect, "Start simulation")
+
+    def _draw_seed_setup_row(self, x: int, y: int, width: int) -> int:
+        random_w = 88
+        gap = 8
+        value_rect = pygame.Rect(x, y, max(80, width - random_w - gap), 24)
+        pygame.draw.rect(self.screen, (24, 29, 40), value_rect, border_radius=6)
+        pygame.draw.rect(self.screen, (54, 64, 86), value_rect, 1, border_radius=6)
+        self._draw_text(str(self.planet.config.seed), value_rect.left + 8, value_rect.top + 4, self.tiny_font, (224, 230, 242))
+
+        random_rect = pygame.Rect(value_rect.right + gap, y, random_w, 24)
+        self.setup_control_rects.append((random_rect, "random_seed", ""))
+        self._draw_button(random_rect, "Random")
+        return y + 30
+
+    def _draw_setup_field_row(self, field: SetupField, x: int, y: int, width: int) -> int:
+        row_h = 50
+        self._draw_text(field.label, x, y + 5, self.tiny_font, (184, 193, 214))
+
+        plus_w = 30
+        value_w = 70
+        gap = 5
+        plus_rect = pygame.Rect(x + width - plus_w, y + 1, plus_w, 23)
+        minus_rect = pygame.Rect(plus_rect.left - gap - plus_w, y + 1, plus_w, 23)
+        value_rect = pygame.Rect(minus_rect.left - gap - value_w, y + 1, value_w, 23)
+
+        value = getattr(self.planet.config, field.key)
+        pygame.draw.rect(self.screen, (24, 29, 40), value_rect, border_radius=6)
+        pygame.draw.rect(self.screen, (54, 64, 86), value_rect, 1, border_radius=6)
+        value_text = field.format_value(value)
+        rendered = self.tiny_font.render(value_text, True, (224, 230, 242))
+        self.screen.blit(rendered, (value_rect.centerx - rendered.get_width() // 2, value_rect.top + 5))
+
+        self.setup_control_rects.append((minus_rect, "field_delta", f"{field.key}:-1"))
+        self.setup_control_rects.append((plus_rect, "field_delta", f"{field.key}:1"))
+        self._draw_button(minus_rect, "-")
+        self._draw_button(plus_rect, "+")
+
+        slider_y = y + 29
+        slider_rect = pygame.Rect(x, slider_y, width, 12)
+        self.setup_slider_rects.append((slider_rect, field.key))
+        self._draw_setup_slider(field, slider_rect, value)
+
+        min_text = field.format_value(field.minimum)
+        max_text = field.format_value(field.maximum)
+        self._draw_text(min_text, slider_rect.left, slider_rect.bottom + 1, self.tiny_font, (118, 128, 152))
+        max_rendered = self.tiny_font.render(max_text, True, (118, 128, 152))
+        self.screen.blit(max_rendered, (slider_rect.right - max_rendered.get_width(), slider_rect.bottom + 1))
+        return y + row_h
+
+    def _draw_setup_slider(self, field: SetupField, rect: pygame.Rect, value: object) -> None:
+        fraction = self._setup_field_fraction(field, value)
+        bg = rect.inflate(0, 2)
+        pygame.draw.rect(self.screen, (20, 24, 34), bg, border_radius=6)
+        pygame.draw.rect(self.screen, (48, 58, 78), bg, 1, border_radius=6)
+        self._draw_gradient_bar(rect, (field.low_color, field.high_color))
+        overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 92))
+        hidden_w = int(rect.width * (1.0 - fraction))
+        if hidden_w > 0:
+            self.screen.blit(overlay, (rect.right - hidden_w, rect.top), pygame.Rect(rect.width - hidden_w, 0, hidden_w, rect.height))
+        knob_x = rect.left + int(round(fraction * rect.width))
+        pygame.draw.line(self.screen, (245, 248, 238), (knob_x, rect.top - 3), (knob_x, rect.bottom + 3), 2)
+
+    def _setup_field_fraction(self, field: SetupField, value: object) -> float:
+        span = max(1e-9, float(field.maximum) - float(field.minimum))
+        return float(np.clip((float(value) - float(field.minimum)) / span, 0.0, 1.0))
+
+    def _set_setup_field_from_slider(self, field_key: str, mouse_x: int, rect: pygame.Rect) -> None:
+        field = next((item for item in PLANET_SETUP_FIELDS if item.key == field_key), None)
+        if field is None:
+            return
+        fraction = float(np.clip((mouse_x - rect.left) / max(1, rect.width), 0.0, 1.0))
+        raw = field.minimum + fraction * (field.maximum - field.minimum)
+        if field.decimals == 0:
+            value = int(round(raw))
+        else:
+            value = round(float(raw), field.decimals)
+        current = getattr(self.planet.config, field.key)
+        if current == value:
+            return
+        self._set_setup_config(**{field.key: value})
+
+    def _handle_setup_action(self, action: str, key: str) -> None:
+        if action == "start":
+            self._start_simulation()
+        elif action == "random_seed":
+            self._randomize_setup_seed()
+        elif action == "seed_delta":
+            self._set_setup_config(seed=max(0, int(self.planet.config.seed) + int(key)))
+        elif action == "field_delta":
+            field_key, direction_text = key.split(":", 1)
+            self._adjust_setup_field(field_key, int(direction_text))
+
+    def _start_simulation(self) -> None:
+        self.in_setup_screen = False
+        self.paused = False
+        self.layer_index = 0
+        self.life_overlay_mode = "biomass"
+        self.selected_cell = None
+        self.selected_species_id = None
+        self._invalidate_cache()
+
+    def _randomize_setup_seed(self) -> None:
+        self._set_setup_config(seed=random_seed())
+
+    def _adjust_setup_field(self, field_key: str, direction: int) -> None:
+        field = next((item for item in PLANET_SETUP_FIELDS if item.key == field_key), None)
+        if field is None:
+            return
+        current = float(getattr(self.planet.config, field.key))
+        value = float(np.clip(current + direction * field.step, field.minimum, field.maximum))
+        if field.decimals == 0:
+            value = int(round(value))
+        else:
+            value = round(value, field.decimals)
+        self._set_setup_config(**{field.key: value})
+
+    def _set_setup_config(self, **changes: object) -> None:
+        try:
+            new_config = replace(self.planet.config, **changes)
+            new_config.validate()
+        except Exception as exc:
+            print(f"Ignored invalid setup config change {changes}: {exc}")
+            return
+        self.planet = Planet.generate(new_config)
+        self.speed = self.planet.config.initial_speed
+        self.selected_cell = None
+        self.selected_species_id = None
+        self._update_layout()
+        self._invalidate_cache()
 
     def _draw_active_layer_header(self, x: int, y: int) -> int:
         legend = LAYER_LEGENDS[self.current_layer]
@@ -392,11 +658,19 @@ class PlanetViewer:
         self._draw_text(line2, x, y, self.tiny_font, (176, 184, 204))
         return y + 14
 
-    def _draw_section_title(self, title: str, x: int, y: int, width: int) -> int:
+    def _draw_section_title(self, title: str, x: int, y: int, width: int, key: str | None = None) -> int:
         rect = pygame.Rect(x, y, width, 22)
-        pygame.draw.rect(self.screen, (28, 33, 46), rect, border_radius=6)
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        fill = (34, 40, 56) if hovered and key is not None else (28, 33, 46)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=6)
         pygame.draw.rect(self.screen, (52, 62, 84), rect, 1, border_radius=6)
-        self._draw_text(title, x + 9, y + 3, self.small_font, (232, 238, 250))
+        text_x = x + 9
+        if key is not None:
+            self.section_header_rects.append((rect, key))
+            marker = "+" if self._is_collapsed(key) else "-"
+            self._draw_text(marker, x + 9, y + 3, self.small_font, (170, 185, 214))
+            text_x = x + 25
+        self._draw_text(title, text_x, y + 3, self.small_font, (232, 238, 250))
         return y + 28
 
     def _draw_key_value_grid(
@@ -428,8 +702,19 @@ class PlanetViewer:
             return text
         return text[: max(0, max_chars - 1)] + "…"
 
+    def _toggle_section(self, section_key: str) -> None:
+        if section_key in self.collapsed_sections:
+            self.collapsed_sections.remove(section_key)
+        else:
+            self.collapsed_sections.add(section_key)
+
+    def _is_collapsed(self, section_key: str) -> bool:
+        return section_key in self.collapsed_sections
+
     def _draw_simulation_summary(self, x: int, y: int, width: int) -> int:
-        y = self._draw_section_title("Simulation", x, y, width)
+        y = self._draw_section_title("Simulation", x, y, width, key="simulation")
+        if self._is_collapsed("simulation"):
+            return y
         return self._draw_key_value_grid(
             (
                 ("seed", str(self.planet.config.seed)),
@@ -445,7 +730,9 @@ class PlanetViewer:
         )
 
     def _draw_life_summary(self, x: int, y: int, width: int) -> int:
-        y = self._draw_section_title("Life summary", x, y, width)
+        y = self._draw_section_title("Life summary", x, y, width, key="life")
+        if self._is_collapsed("life"):
+            return y
         y = self._draw_key_value_grid(
             (
                 ("living", f"{self.planet.living_species_count}"),
@@ -463,7 +750,9 @@ class PlanetViewer:
         return self._draw_top_species(x, y, width)
 
     def _draw_planet_summary(self, x: int, y: int, width: int) -> int:
-        y = self._draw_section_title("Planet averages", x, y, width)
+        y = self._draw_section_title("Planet averages", x, y, width, key="planet")
+        if self._is_collapsed("planet"):
+            return y
         return self._draw_key_value_grid(
             (
                 ("land", f"{100.0 * self.planet.land.mean():.1f}%"),
@@ -483,7 +772,9 @@ class PlanetViewer:
         )
 
     def _draw_selected_zone(self, x: int, y: int, width: int) -> int:
-        y = self._draw_section_title("Selected zone", x, y, width)
+        y = self._draw_section_title("Selected zone", x, y, width, key="zone")
+        if self._is_collapsed("zone"):
+            return y
 
         if self.selected_cell is None:
             self._draw_text("Click anywhere on the map to inspect local ecology.", x, y, self.tiny_font, (178, 186, 206))
@@ -517,16 +808,165 @@ class PlanetViewer:
             self._draw_text("Local lineages: none", x, y, self.tiny_font, (145, 154, 178))
             return y + 16
 
-        self._draw_text("Local top lineages", x, y, self.tiny_font, (220, 226, 240))
+        self._draw_text("Local top lineages  (click to inspect)", x, y, self.tiny_font, (220, 226, 240))
         y += 14
         for species, local_total, _global_total in local_top:
-            color_rect = pygame.Rect(x, y + 2, 10, 10)
-            pygame.draw.rect(self.screen, species.color, color_rect)
-            pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
             label = f"{species.name}  {local_total:.2f}  {self.planet.species_strategy_label(species)}"
-            self._draw_text(self._clip_text(label, 48), x + 16, y, self.tiny_font, (190, 199, 218))
-            y += 14
+            y = self._draw_species_row(species, label, x, y, width)
         return y
+
+    def _draw_selected_lineage(self, x: int, y: int, width: int) -> int:
+        y = self._draw_section_title("Selected lineage / habitat", x, y, width, key="lineage")
+        if self._is_collapsed("lineage"):
+            return y
+
+        species = self.planet.species_by_id(self.selected_species_id)
+        if species is None:
+            if self.selected_species_id is not None:
+                self.selected_species_id = None
+            self._draw_text("Click a local/global lineage row to open its card.", x, y, self.tiny_font, (178, 186, 206))
+            y += 14
+            self._draw_text("The selected lineage is highlighted on the map.", x, y, self.tiny_font, (145, 154, 178))
+            return y + 17
+
+        summary = self.planet.lineage_habitat_summary(species.id)
+        strategy = self.planet.species_strategy_label(species)
+        total_pop = summary.total_population
+        status = "extinct" if species.is_extinct else "living"
+        age_end = species.extinct_tick if species.extinct_tick is not None else self.planet.tick
+        age = max(0, age_end - species.created_tick)
+        parent = self.planet.species_by_id(species.parent_id)
+        parent_name = "seed" if parent is None else parent.name
+        children = self.planet.descendant_count(species.id)
+
+        # Small color/name header.
+        header_rect = pygame.Rect(x, y, width, 22)
+        pygame.draw.rect(self.screen, (23, 28, 38), header_rect, border_radius=5)
+        pygame.draw.rect(self.screen, (58, 68, 90), header_rect, 1, border_radius=5)
+        swatch = pygame.Rect(x + 7, y + 5, 12, 12)
+        pygame.draw.rect(self.screen, species.color, swatch)
+        pygame.draw.rect(self.screen, (112, 120, 142), swatch, 1)
+        title = f"{species.name} — {strategy}"
+        self._draw_text(self._clip_text(title, 44), x + 26, y + 3, self.small_font, (232, 238, 250))
+        y += 28
+
+        y = self._draw_key_value_grid(
+            (
+                ("status", status),
+                ("age", str(age)),
+                ("parent", parent_name),
+                ("children", str(children)),
+                ("biomass", f"{total_pop:.2f}"),
+                ("peak", f"{species.population_peak:.2f}"),
+                ("cells", str(summary.occupied_cells)),
+                ("habitat", summary.main_habitat),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 4
+
+        if summary.strongest_cell is not None:
+            sx, sy = summary.strongest_cell
+            self._draw_text(f"strongest: x{sx} y{sy}", x, y, self.tiny_font, (165, 174, 196))
+            y += 14
+
+        self._draw_text("Habitat summary", x, y, self.tiny_font, (220, 226, 240))
+        y += 14
+        y = self._draw_key_value_grid(
+            (
+                ("temp", f"{summary.mean_temperature_c:.1f} C"),
+                ("water", f"{summary.mean_water_access:.2f}"),
+                ("fert", f"{summary.mean_fertility:.2f}"),
+                ("tox", f"{summary.mean_toxicity:.2f}"),
+                ("nutr", f"{summary.mean_nutrients:.2f}"),
+                ("chem", f"{summary.mean_chemical_energy:.2f}"),
+                ("dead", f"{summary.mean_dead_matter:.3f}"),
+                ("light", f"{summary.mean_light:.2f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 4
+
+        self._draw_text("Traits", x, y, self.tiny_font, (220, 226, 240))
+        y += 14
+        traits = species.traits
+        y = self._draw_key_value_grid(
+            (
+                ("photo", f"{traits.photosynthesis:.2f}"),
+                ("chemo", f"{traits.chemosynthesis:.2f}"),
+                ("detrit", f"{traits.organic_absorption:.2f}"),
+                ("disp", f"{traits.dispersal:.2f}"),
+                ("tox tol", f"{traits.toxicity_tolerance:.2f}"),
+                ("mut", f"{traits.mutation_rate:.3f}"),
+                ("temp opt", f"{traits.temperature_optimum_c:.1f}"),
+                ("temp tol", f"{traits.temperature_tolerance_c:.1f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+        return y
+
+    def _draw_species_row(self, species, label: str, x: int, y: int, width: int) -> int:
+        row_h = 16
+        rect = pygame.Rect(x, y - 1, width, row_h)
+        self.species_row_rects.append((rect, species.id))
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        selected = self.selected_species_id == species.id
+        if selected or hovered:
+            fill = (45, 56, 76) if selected else (30, 36, 50)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=4)
+            border = (135, 176, 150) if selected else (72, 84, 108)
+            pygame.draw.rect(self.screen, border, rect, 1, border_radius=4)
+
+        color_rect = pygame.Rect(x + 3, y + 2, 10, 10)
+        pygame.draw.rect(self.screen, species.color, color_rect)
+        pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
+        text_color = (234, 242, 235) if selected else (190, 199, 218)
+        self._draw_text(self._clip_text(label, 49), x + 18, y, self.tiny_font, text_color)
+        return y + row_h
+
+    def _draw_selected_species_distribution(self) -> None:
+        species = self.planet.species_by_id(self.selected_species_id)
+        if species is None:
+            return
+        index = self.planet.species_index_by_id(species.id)
+        if index is None:
+            return
+        pop = np.clip(self.planet.populations[index], 0.0, 1.0)
+        if float(pop.max()) <= 0.0:
+            return
+
+        h, w = pop.shape
+        alpha = np.clip(28 + 190 * np.sqrt(pop / max(float(pop.max()), 0.025)), 0, 218).astype(np.uint8)
+        alpha[pop <= 0.004] = 0
+        if int(alpha.max()) <= 0:
+            return
+
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        color = np.array(species.color, dtype=np.uint8)
+        rgb[:, :] = color
+        surface = pygame.Surface((w, h), pygame.SRCALPHA)
+        pixels = pygame.surfarray.pixels3d(surface)
+        pixels[:] = np.transpose(rgb, (1, 0, 2))
+        del pixels
+        pixels_alpha = pygame.surfarray.pixels_alpha(surface)
+        pixels_alpha[:] = np.transpose(alpha, (1, 0))
+        del pixels_alpha
+        scaled = pygame.transform.scale(surface, self.map_rect.size)
+        self.screen.blit(scaled, self.map_rect.topleft)
+
+        # Small readable label on the map itself.
+        label = f"selected: {species.name}"
+        text = self.small_font.render(label, True, (245, 248, 240))
+        bg = pygame.Rect(self.map_rect.left + 12, self.map_rect.top + 12, text.get_width() + 14, text.get_height() + 8)
+        pygame.draw.rect(self.screen, (16, 20, 26), bg, border_radius=6)
+        pygame.draw.rect(self.screen, species.color, bg, 1, border_radius=6)
+        self.screen.blit(text, (bg.left + 7, bg.top + 4))
 
     def _screen_pos_to_cell(self, pos: tuple[int, int]) -> tuple[int, int] | None:
         if not self.map_rect.collidepoint(pos):
@@ -562,13 +1002,9 @@ class PlanetViewer:
         self._draw_text("Global top lineages", x, y, self.tiny_font, (220, 226, 240))
         y += 14
         for species, total in top:
-            color_rect = pygame.Rect(x, y + 2, 10, 10)
-            pygame.draw.rect(self.screen, species.color, color_rect)
-            pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
             status = "†" if species.is_extinct else ""
             label = f"{species.name}{status}  {total:.1f}  {self.planet.species_strategy_label(species)}"
-            self._draw_text(self._clip_text(label, 48), x + 16, y, self.tiny_font, (190, 199, 218))
-            y += 14
+            y = self._draw_species_row(species, label, x, y, width)
         return y
 
     def _draw_settings_row(self, x: int, y: int) -> int:
