@@ -1,8 +1,9 @@
 import numpy as np
+import pygame
 
 from alife import Planet, PlanetConfig
 from alife.planet import SimulationEvent
-from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay
+from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay, specimen_keywords
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -926,3 +927,121 @@ def test_lineage_habitat_summary_includes_phase6_observer_fields():
 
     assert 0.0 <= summary.mean_migration_pressure <= 1.0
     assert 0.0 <= summary.mean_isolation_pressure <= 1.0
+
+
+def test_viewer_defaults_to_3d_and_all_weather_without_running_pygame_init():
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    # Guard the source-level defaults without opening a Pygame window.
+    source = PlanetViewer.__init__.__code__.co_consts
+    assert "all" in source
+    assert "3d" in source
+
+
+def test_event_log_modal_click_selects_event_species_and_location():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=6768))
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    species_id = planet.species[0].id
+
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.selected_species_id = None
+    viewer.selected_cell = None
+    viewer.event_log_modal_open = True
+    viewer.event_log_modal_close_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.event_log_filter_button_rects = []
+    viewer.event_log_modal_row_rects = [(pygame.Rect(10, 10, 120, 20), species_id, (int(x), int(y)))]
+    viewer.event_log_modal_rect = pygame.Rect(0, 0, 400, 300)
+
+    viewer._handle_event_log_modal_click((15, 15))
+
+    assert viewer.selected_species_id == species_id
+    assert viewer.selected_cell == (int(x), int(y))
+    assert viewer.event_log_modal_open is False
+
+
+def test_global_life_tree_rows_include_roots_and_descendants_in_tree_order():
+    planet = Planet.generate(
+        PlanetConfig(width=40, height=20, seed=6869, abiogenesis_rate=0.0, speciation_rate=1.0)
+    )
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    planet.populations[0].fill(0.0)
+    planet._add_population_blob(0, int(y), int(x), amount=2.0, radius=4.0)
+    planet._maybe_branch_lineages(steps=4000)
+
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+
+    rows = viewer._global_life_tree_rows()
+    assert rows
+    assert rows[0][0] == 0
+    assert rows[0][1].parent_id is None
+    assert any(depth >= 1 and species.parent_id == rows[0][1].id for depth, species in rows)
+
+
+def test_life_tree_modal_click_selects_lineage_and_strongest_cell():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=6970))
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    species_id = planet.species[0].id
+    planet._update_biomass_maps()
+
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.selected_species_id = None
+    viewer.selected_cell = None
+    viewer.life_tree_modal_open = True
+    viewer.life_tree_modal_close_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.life_tree_modal_rect = pygame.Rect(0, 0, 400, 300)
+    viewer.life_tree_modal_row_rects = [(pygame.Rect(10, 10, 120, 20), species_id)]
+
+    viewer._handle_life_tree_modal_click((15, 15))
+
+    assert viewer.selected_species_id == species_id
+    assert viewer.selected_cell is not None
+    assert viewer.life_tree_modal_open is True
+
+
+def test_specimen_keywords_are_trait_driven_observer_text():
+    from alife.life import LifeSpecies, LifeTraits
+
+    species = LifeSpecies(
+        1,
+        None,
+        "Demo-001",
+        (120, 210, 140),
+        LifeTraits(
+            photosynthesis=0.85,
+            chemosynthesis=0.10,
+            organic_absorption=0.20,
+            living_consumption=0.05,
+            defense=0.72,
+            storage=0.18,
+            temperature_optimum_c=21.0,
+            temperature_tolerance_c=15.0,
+            water_preference=0.5,
+            water_tolerance=0.5,
+            toxicity_tolerance=0.22,
+            reproduction_rate=0.8,
+            metabolism_cost=0.05,
+            dispersal=0.12,
+            mutation_rate=0.01,
+        ),
+        created_tick=0,
+    )
+
+    words = specimen_keywords(species)
+
+    assert words
+    assert "sun-catcher" in words
+    assert "armored" in words
+    assert len(words) <= 3
+
+
+def test_panel_toggle_source_controls_exist_without_opening_window():
+    source = PlanetViewer._handle_key.__code__.co_consts + PlanetViewer._draw_settings_row.__code__.co_consts
+
+    assert "Panel: wide" in source
+    assert "Panel: narrow" in source
+    assert "Hide panel" in source

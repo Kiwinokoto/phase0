@@ -76,6 +76,28 @@ EXTINCT_CRIMSON: Color = (205, 46, 62)
 EXTINCT_DARK: Color = (82, 28, 38)
 
 
+def specimen_keywords(species) -> tuple[str, ...]:
+    """Return a small observer-facing phenotype interpretation.
+
+    This is deliberately visual/narrative only: a lineage remains a population
+    field, not a simulated individual. The words just help the card generate a
+    stable specimen impression from inherited traits.
+    """
+    traits = species.traits
+    candidates = [
+        (traits.photosynthesis, "sun-catcher"),
+        (traits.chemosynthesis, "vent-fed"),
+        (traits.organic_absorption, "detritus-feeder"),
+        (traits.living_consumption, "biomass-feeder"),
+        (traits.defense, "armored"),
+        (traits.storage, "reservoir"),
+        (traits.dispersal, "wanderer"),
+        (traits.toxicity_tolerance, "toxin-tolerant"),
+    ]
+    ordered = [label for _value, label in sorted(candidates, reverse=True) if _value >= 0.18]
+    return tuple(ordered[:3]) or ("generalist",)
+
+
 LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
     "biome": LayerLegend(
         title="Biome",
@@ -213,7 +235,7 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
 
 
 class PlanetViewer:
-    """Small Pygame viewer for Phase 5 richer proto-ecology maps."""
+    """Small Pygame viewer for Phase 6 mobility/isolation proto-ecology maps."""
 
     layers: tuple[LayerName, ...] = (
         "biome",
@@ -252,8 +274,12 @@ class PlanetViewer:
         self.skip_intro = True
         self.fullscreen = bool(start_fullscreen)
         self.life_overlay_mode: OverlayMode = "biomass"
-        self.weather_overlay_mode: WeatherOverlayMode = "clouds"
-        self.projection_mode: ProjectionMode = "2d"
+        self.weather_overlay_mode: WeatherOverlayMode = "all"
+        self.projection_mode: ProjectionMode = "3d"
+        self.panel_collapsed = False
+        self.panel_narrow_width = 410
+        self.panel_wide_width = 760
+        self.panel_layout_mode = "narrow"
         self.speed = planet.config.initial_speed
         self.selected_cell: tuple[int, int] | None = None  # stored as (x, y) map coordinates
         self.selected_species_id: int | None = None
@@ -269,6 +295,12 @@ class PlanetViewer:
         self.event_log_modal_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_filter_button_rects: list[tuple[pygame.Rect, str]] = []
+        self.event_log_modal_row_rects: list[tuple[pygame.Rect, int, tuple[int, int] | None]] = []
+        self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.life_tree_modal_open = False
+        self.life_tree_modal_rect = pygame.Rect(0, 0, 0, 0)
+        self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.life_tree_modal_row_rects: list[tuple[pygame.Rect, int]] = []
         self.event_filter_show_volcanism = False
         self.event_birth_filter_mode = "early"  # early/all/hidden
         self.setup_control_rects: list[tuple[pygame.Rect, str, str]] = []
@@ -290,12 +322,15 @@ class PlanetViewer:
             self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
-        pygame.display.set_caption("Artificial Life Sandbox — Phase 5")
+        pygame.display.set_caption("Artificial Life Sandbox — Phase 6")
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
         self.life_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
         self.weather_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.panel_layout_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.panel_hide_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.panel_tab_rect = pygame.Rect(0, 0, 0, 0)
         self._update_layout()
 
         self.clock = pygame.time.Clock()
@@ -347,6 +382,16 @@ class PlanetViewer:
         pygame.quit()
 
     def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
+        if self.panel_collapsed and not self.in_setup_screen and self.panel_tab_rect.collidepoint(pos):
+            self.panel_collapsed = False
+            self._update_layout()
+            self._invalidate_cache()
+            return
+
+        if self.life_tree_modal_open:
+            self._handle_life_tree_modal_click(pos)
+            return
+
         if self.event_log_modal_open:
             self._handle_event_log_modal_click(pos)
             return
@@ -381,6 +426,20 @@ class PlanetViewer:
 
         if self.weather_overlay_button_rect.collidepoint(pos):
             self._cycle_weather_overlay()
+            return
+
+        if self.panel_layout_button_rect.collidepoint(pos):
+            self._toggle_panel_width()
+            return
+
+        if self.panel_hide_button_rect.collidepoint(pos):
+            self.panel_collapsed = True
+            self._update_layout()
+            self._invalidate_cache()
+            return
+
+        if self.life_tree_button_rect.collidepoint(pos) and self.planet.species:
+            self.life_tree_modal_open = True
             return
 
         if self.genealogy_button_rect.collidepoint(pos) and self.selected_species_id is not None:
@@ -436,11 +495,40 @@ class PlanetViewer:
                     self.event_birth_filter_mode = modes[(current + 1) % len(modes)]
                 return
 
+        for rect, species_id, location in self.event_log_modal_row_rects:
+            if rect.collidepoint(pos):
+                if self.planet.species_by_id(species_id) is not None:
+                    self.selected_species_id = species_id
+                    if location is not None:
+                        self.selected_cell = location
+                    self.event_log_modal_open = False
+                return
+
         # Click outside the modal to close it.
         if not self.event_log_modal_rect.collidepoint(pos):
             self.event_log_modal_open = False
 
+    def _handle_life_tree_modal_click(self, pos: tuple[int, int]) -> None:
+        if self.life_tree_modal_close_rect.collidepoint(pos):
+            self.life_tree_modal_open = False
+            return
+
+        for rect, species_id in self.life_tree_modal_row_rects:
+            if rect.collidepoint(pos):
+                if self.planet.species_by_id(species_id) is not None:
+                    self.selected_species_id = species_id
+                    summary = self.planet.lineage_habitat_summary(species_id)
+                    if summary.strongest_cell is not None:
+                        self.selected_cell = summary.strongest_cell
+                return
+
+        if not self.life_tree_modal_rect.collidepoint(pos):
+            self.life_tree_modal_open = False
+
     def _handle_key(self, key: int) -> bool:
+        if self.life_tree_modal_open and key == pygame.K_ESCAPE:
+            self.life_tree_modal_open = False
+            return True
         if self.event_log_modal_open and key == pygame.K_ESCAPE:
             self.event_log_modal_open = False
             return True
@@ -484,6 +572,12 @@ class PlanetViewer:
             self._cycle_life_overlay()
         elif key == pygame.K_w:
             self._cycle_weather_overlay()
+        elif key == pygame.K_p:
+            self._toggle_panel_width()
+        elif key == pygame.K_h:
+            self.panel_collapsed = not self.panel_collapsed
+            self._update_layout()
+            self._invalidate_cache()
         elif key == pygame.K_r:
             self.planet = self.planet.regenerate(seed=random_seed())
             self.selected_cell = None
@@ -517,9 +611,26 @@ class PlanetViewer:
         self.projection_mode = PROJECTION_MODES[(index + 1) % len(PROJECTION_MODES)]
         self._invalidate_cache()
 
+    def _toggle_panel_width(self) -> None:
+        if self.in_setup_screen:
+            return
+        if self.panel_layout_mode == "wide":
+            self.panel_layout_mode = "narrow"
+            self.side_panel_width = self.panel_narrow_width
+        else:
+            self.panel_layout_mode = "wide"
+            self.side_panel_width = self.panel_wide_width
+        self.panel_collapsed = False
+        self._update_layout()
+        self._invalidate_cache()
+
     def _update_layout(self) -> None:
         screen_w, screen_h = self.screen.get_size()
-        panel_w = min(self.side_panel_width, max(300, screen_w // 3))
+        if self.panel_collapsed and not self.in_setup_screen:
+            panel_w = 0
+        else:
+            max_panel_w = max(320, min(820, screen_w - 120))
+            panel_w = int(np.clip(self.side_panel_width, 320, max_panel_w))
         map_area_w = max(1, screen_w - panel_w)
         map_area_h = max(1, screen_h)
 
@@ -534,6 +645,8 @@ class PlanetViewer:
 
         self.map_rect = pygame.Rect(map_left, map_top, map_w, map_h)
         self.panel_rect = pygame.Rect(map_area_w, 0, panel_w, screen_h)
+        tab_w, tab_h = 72, 28
+        self.panel_tab_rect = pygame.Rect(max(0, screen_w - tab_w - 10), 12, tab_w, tab_h)
 
     def _invalidate_cache(self) -> None:
         self.cached_layer = None
@@ -549,11 +662,16 @@ class PlanetViewer:
         if not self.in_setup_screen:
             self._draw_selected_species_distribution()
             self._draw_selection_marker()
-        self._draw_panel()
+        if self.panel_collapsed and not self.in_setup_screen:
+            self._draw_collapsed_panel_tab()
+        else:
+            self._draw_panel()
         if self.genealogy_modal_species_id is not None:
             self._draw_genealogy_modal()
         if self.event_log_modal_open:
             self._draw_event_log_modal()
+        if self.life_tree_modal_open:
+            self._draw_life_tree_modal()
 
     def _get_map_surface(self) -> pygame.Surface:
         layer = "biome" if self.in_setup_screen else self.current_layer
@@ -606,8 +724,14 @@ class PlanetViewer:
         self.event_log_button_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_filter_button_rects = []
+        self.event_log_modal_row_rects = []
+        self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.life_tree_modal_row_rects = []
         self.weather_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
         self.projection_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.panel_layout_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.panel_hide_button_rect = pygame.Rect(0, 0, 0, 0)
         self.setup_control_rects = []
         self.setup_slider_rects = []
         self.section_header_rects = []
@@ -620,13 +744,15 @@ class PlanetViewer:
             self._draw_setup_panel(x, y, content_w)
             return
 
-        self._draw_text("Phase 5 — Richer Ecology", x, y, self.font, (235, 238, 245))
+        self._draw_text("Phase 6 — Mobility & Isolation", x, y, self.font, (235, 238, 245))
         y += 25
 
         y = self._draw_active_layer_header(x, y)
         y += 9
 
         y = self._draw_settings_row(x, y)
+        y += 7
+        y = self._draw_global_life_tree_button(x, y, content_w)
         y += 8
 
         y = self._draw_compact_controls(x, y, content_w)
@@ -636,20 +762,38 @@ class PlanetViewer:
         legend_y = max(y + 250, panel.bottom - legend_height)
         section_limit = legend_y - 12
 
-        for draw_section in (
-            self._draw_simulation_summary,
-            self._draw_event_log,
-            self._draw_planet_summary,
-            self._draw_life_summary,
-            self._draw_selected_zone,
-            self._draw_selected_lineage,
-        ):
-            if y > section_limit - 34:
-                self._draw_text("Collapse sections above to reveal more details.", x, y, self.tiny_font, (190, 170, 130))
-                y += 16
-                break
-            y = draw_section(x, y, content_w)
-            y += 12
+        if content_w >= 620:
+            gap = 16
+            col_w = (content_w - gap) // 2
+            left_x = x
+            right_x = x + col_w + gap
+            left_y = y
+            right_y = y
+            for draw_section in (self._draw_simulation_summary, self._draw_event_log, self._draw_planet_summary):
+                if left_y > section_limit - 34:
+                    self._draw_text("Collapse sections above to reveal more details.", left_x, left_y, self.tiny_font, (190, 170, 130))
+                    break
+                left_y = draw_section(left_x, left_y, col_w) + 12
+            for draw_section in (self._draw_life_summary, self._draw_selected_zone, self._draw_selected_lineage):
+                if right_y > section_limit - 34:
+                    self._draw_text("Collapse sections above to reveal more details.", right_x, right_y, self.tiny_font, (190, 170, 130))
+                    break
+                right_y = draw_section(right_x, right_y, col_w) + 12
+        else:
+            for draw_section in (
+                self._draw_simulation_summary,
+                self._draw_event_log,
+                self._draw_planet_summary,
+                self._draw_life_summary,
+                self._draw_selected_zone,
+                self._draw_selected_lineage,
+            ):
+                if y > section_limit - 34:
+                    self._draw_text("Collapse sections above to reveal more details.", x, y, self.tiny_font, (190, 170, 130))
+                    y += 16
+                    break
+                y = draw_section(x, y, content_w)
+                y += 12
 
         self._draw_current_layer_legend(x, legend_y, content_w)
 
@@ -1222,6 +1366,9 @@ class PlanetViewer:
             self._draw_text(extinct_text, x, y, self.tiny_font, EXTINCT_CRIMSON)
             y += 15
 
+        y = self._draw_species_specimen_card(species, x, y, width)
+        y += 8
+
         y = self._draw_key_value_grid(
             (
                 ("status", status),
@@ -1329,6 +1476,7 @@ class PlanetViewer:
         modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
         self.event_log_modal_rect = modal
         self.event_log_filter_button_rects = []
+        self.event_log_modal_row_rects = []
 
         pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
         pygame.draw.rect(self.screen, (84, 96, 126), modal, 1, border_radius=12)
@@ -1399,18 +1547,27 @@ class PlanetViewer:
         else:
             visible_rows = max(1, (row_bottom - row_top) // 18)
             for event in events[:visible_rows]:
+                row_rect = pygame.Rect(x, y - 1, width, 17)
                 color = self._event_kind_color(event.kind)
+                clickable = event.species_id is not None and self.planet.species_by_id(event.species_id) is not None
+                if clickable:
+                    self.event_log_modal_row_rects.append((row_rect, int(event.species_id), event.location))
+                hovered = clickable and row_rect.collidepoint(pygame.mouse.get_pos())
+                if hovered:
+                    pygame.draw.rect(self.screen, (35, 43, 58), row_rect, border_radius=4)
+                    pygame.draw.rect(self.screen, (92, 110, 145), row_rect, 1, border_radius=4)
                 loc = "" if event.location is None else f"  x{event.location[0]} y{event.location[1]}"
                 marker = "★ DESCENDANT " if event.kind == "branch" else ""
-                text = f"{marker}t{event.tick:<5} {event.kind:<10} {event.message}{loc}"
-                self._draw_text(self._clip_text(text, max(24, width // 7)), x, y, self.tiny_font, color)
+                cursor = "↪ " if clickable else "  "
+                text = f"{cursor}{marker}t{event.tick:<5} {event.kind:<10} {event.message}{loc}"
+                self._draw_text(self._clip_text(text, max(24, width // 7)), x + 4, y, self.tiny_font, color)
                 y += 18
             remaining = len(events) - visible_rows
             if remaining > 0 and y <= row_bottom - 14:
                 self._draw_text(f"… {remaining} older visible events hidden", x, y, self.tiny_font, (150, 160, 184))
 
         self._draw_text(
-            "Use Births: all to audit roots. Descendant/speciation events stay visible and yellow.",
+            "Click species-related events to inspect them. Descendant/speciation events stay yellow.",
             x,
             modal.bottom - 28,
             self.tiny_font,
@@ -1741,6 +1898,81 @@ class PlanetViewer:
         pygame.draw.line(self.screen, (245, 245, 235), (center[0] - radius_px - 3, center[1]), (center[0] + radius_px + 3, center[1]), 1)
         pygame.draw.line(self.screen, (245, 245, 235), (center[0], center[1] - radius_px - 3), (center[0], center[1] + radius_px + 3), 1)
 
+    def _draw_species_specimen_card(self, species, x: int, y: int, width: int) -> int:
+        card_h = 72
+        rect = pygame.Rect(x, y, width, card_h)
+        fill = (20, 24, 34) if not species.is_extinct else EXTINCT_DARK
+        border = (58, 68, 90) if not species.is_extinct else EXTINCT_CRIMSON
+        pygame.draw.rect(self.screen, fill, rect, border_radius=7)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=7)
+
+        specimen_size = min(62, max(44, card_h - 14))
+        specimen_rect = pygame.Rect(x + 8, y + 5, specimen_size, specimen_size)
+        self._draw_species_specimen(species, specimen_rect)
+
+        text_x = specimen_rect.right + 10
+        self._draw_text("Specimen impression", text_x, y + 7, self.tiny_font, (220, 226, 240))
+        self._draw_text("population-level visual", text_x, y + 21, self.tiny_font, (145, 154, 178))
+        words = " / ".join(specimen_keywords(species))
+        color = EXTINCT_CRIMSON if species.is_extinct else (178, 206, 188)
+        self._draw_text(self._clip_text(words, max(16, (width - specimen_size - 28) // 7)), text_x, y + 39, self.tiny_font, color)
+        return y + card_h
+
+    def _draw_species_specimen(self, species, rect: pygame.Rect) -> None:
+        traits = species.traits
+        surface = pygame.Surface(rect.size, pygame.SRCALPHA)
+        rng = np.random.default_rng(self.planet.config.seed + species.id * 7919)
+        cx, cy = rect.width // 2, rect.height // 2
+        base = species.color
+        bg = (8, 12, 20, 245) if not species.is_extinct else (36, 12, 18, 245)
+        pygame.draw.rect(surface, bg, surface.get_rect(), border_radius=8)
+
+        # Soft aura: energy source tint, not a real individual simulation.
+        aura_color = (80, 210, 120, 42) if traits.photosynthesis >= traits.chemosynthesis else (180, 118, 255, 42)
+        if traits.living_consumption > max(traits.photosynthesis, traits.chemosynthesis, traits.organic_absorption):
+            aura_color = (255, 120, 90, 48)
+        pygame.draw.circle(surface, aura_color, (cx, cy), int(rect.width * (0.34 + 0.20 * traits.storage)))
+
+        appendages = int(np.clip(2 + traits.dispersal * 7 + traits.living_consumption * 5 + traits.organic_absorption * 3, 2, 12))
+        appendage_len = int(rect.width * (0.18 + 0.18 * traits.dispersal + 0.08 * traits.organic_absorption))
+        for i in range(appendages):
+            angle = 2 * np.pi * (i / appendages) + float(rng.normal(0.0, 0.08))
+            inner = int(rect.width * (0.16 + 0.05 * traits.defense))
+            x1 = cx + int(np.cos(angle) * inner)
+            y1 = cy + int(np.sin(angle) * inner)
+            x2 = cx + int(np.cos(angle) * (inner + appendage_len))
+            y2 = cy + int(np.sin(angle) * (inner + appendage_len))
+            limb_color = _lerp_color(base, (230, 240, 230), 0.28)
+            pygame.draw.line(surface, (*limb_color, 180), (x1, y1), (x2, y2), max(1, int(1 + traits.dispersal * 2)))
+
+        body_rx = int(rect.width * (0.17 + 0.09 * traits.storage + 0.08 * traits.defense))
+        body_ry = int(rect.height * (0.15 + 0.08 * traits.photosynthesis + 0.06 * traits.defense))
+        body_rect = pygame.Rect(cx - body_rx, cy - body_ry, body_rx * 2, body_ry * 2)
+        body_color = _lerp_color(base, (235, 242, 228), 0.10 + 0.20 * traits.photosynthesis)
+        pygame.draw.ellipse(surface, (*body_color, 232), body_rect)
+        outline = EXTINCT_CRIMSON if species.is_extinct else _lerp_color(base, (255, 255, 255), 0.40)
+        pygame.draw.ellipse(surface, (*outline, 230), body_rect, max(1, int(1 + traits.defense * 4)))
+
+        spots = int(np.clip(2 + traits.chemosynthesis * 6 + traits.toxicity_tolerance * 4, 2, 10))
+        for _ in range(spots):
+            px = int(cx + rng.normal(0, max(2, body_rx * 0.45)))
+            py = int(cy + rng.normal(0, max(2, body_ry * 0.45)))
+            spot_r = int(rng.integers(1, 4))
+            spot_color = (238, 198, 92, 190) if traits.chemosynthesis > 0.35 else (120, 220, 145, 180)
+            pygame.draw.circle(surface, spot_color, (px, py), spot_r)
+
+        if traits.living_consumption > 0.18:
+            mouth_w = int(5 + traits.living_consumption * 8)
+            pygame.draw.line(surface, (38, 20, 24, 230), (cx - mouth_w, cy + 2), (cx + mouth_w, cy + 2), 2)
+        self.screen.blit(surface, rect.topleft)
+        pygame.draw.rect(self.screen, (80, 90, 115), rect, 1, border_radius=8)
+
+    def _draw_collapsed_panel_tab(self) -> None:
+        rect = self.panel_tab_rect
+        pygame.draw.rect(self.screen, (38, 44, 62), rect, border_radius=7)
+        pygame.draw.rect(self.screen, (108, 126, 160), rect, 1, border_radius=7)
+        self._draw_text("Panel", rect.left + 14, rect.top + 7, self.small_font, (232, 238, 250))
+
     def _draw_top_species(self, x: int, y: int, width: int) -> int:
         top = self.planet.top_species(limit=3)
         if not top:
@@ -1777,7 +2009,160 @@ class PlanetViewer:
         weather_label = f"Weather: {self.weather_overlay_mode}"
         self.weather_overlay_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
         self._draw_button(self.weather_overlay_button_rect, weather_label)
+
+        y += button_h + 7
+        panel_label = "Panel: narrow" if self.panel_layout_mode == "wide" else "Panel: wide"
+        self.panel_layout_button_rect = pygame.Rect(x, y, button_w, button_h)
+        self._draw_button(self.panel_layout_button_rect, panel_label)
+
+        self.panel_hide_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
+        self._draw_button(self.panel_hide_button_rect, "Hide panel")
         return y + button_h
+
+    def _draw_global_life_tree_button(self, x: int, y: int, width: int) -> int:
+        """Draw the global life-tree button once any lineage exists."""
+        if not self.planet.species:
+            self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
+            return y
+
+        self.life_tree_button_rect = pygame.Rect(x, y, width, 27)
+        self._draw_button(self.life_tree_button_rect, "Life tree")
+        return y + 31
+
+    def _global_life_tree_rows(self) -> list[tuple[int, object]]:
+        """Return all known lineages as a root-first genealogy forest."""
+        rows: list[tuple[int, object]] = []
+        roots = [species for species in self.planet.species if species.parent_id is None]
+        roots.sort(key=lambda species: (species.created_tick, species.id))
+        for root in roots:
+            rows.append((0, root))
+            for depth, child in self.planet.lineage_descendants(root.id):
+                rows.append((depth, child))
+        # Extremely defensive fallback for malformed imported state.
+        if not rows and self.planet.species:
+            rows = [(0, species) for species in sorted(self.planet.species, key=lambda item: (item.created_tick, item.id))]
+        return rows
+
+    def _draw_life_tree_modal(self) -> None:
+        rows = self._global_life_tree_rows()
+        screen_w, screen_h = self.screen.get_size()
+        overlay = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
+        overlay.fill((3, 5, 10, 168))
+        self.screen.blit(overlay, (0, 0))
+
+        modal_w = min(980, screen_w - 90)
+        modal_h = min(740, screen_h - 86)
+        modal_w = max(560, modal_w)
+        modal_h = max(460, modal_h)
+        modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
+        self.life_tree_modal_rect = modal
+        self.life_tree_modal_row_rects = []
+
+        pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
+        pygame.draw.rect(self.screen, (96, 116, 154), modal, 1, border_radius=12)
+        pygame.draw.rect(self.screen, (42, 49, 68), modal.inflate(-2, -2), 1, border_radius=11)
+
+        x = modal.left + 22
+        y = modal.top + 18
+        width = modal.width - 44
+        close_rect = pygame.Rect(modal.right - 40, modal.top + 14, 24, 24)
+        self.life_tree_modal_close_rect = close_rect
+        self._draw_button(close_rect, "×")
+
+        self._draw_text("Global life tree", x, y, self.font, (238, 243, 252))
+        y += 23
+        self._draw_text(
+            "Root lineages, descendants and extinctions. Click a row to inspect that lineage.",
+            x,
+            y,
+            self.tiny_font,
+            (165, 176, 200),
+        )
+        y += 21
+
+        counts = self._event_counts()
+        y = self._draw_key_value_grid(
+            (
+                ("lineages", f"{len(self.planet.species)}/{self.planet.config.max_species}"),
+                ("living", str(self.planet.living_species_count)),
+                ("extinct", str(self.planet.extinction_count)),
+                ("roots", str(sum(1 for species in self.planet.species if species.parent_id is None))),
+                ("branches", str(sum(1 for species in self.planet.species if species.parent_id is not None))),
+                ("birth events", str(counts.get("birth", 0))),
+                ("branch events", str(counts.get("branch", 0))),
+                ("ext events", str(counts.get("extinction", 0))),
+            ),
+            x,
+            y,
+            width,
+            columns=4,
+        )
+        y += 16
+
+        header_rect = pygame.Rect(x, y, width, 20)
+        pygame.draw.rect(self.screen, (25, 31, 44), header_rect, border_radius=5)
+        self._draw_text("Tree", x + 8, y + 3, self.tiny_font, (190, 202, 226))
+        self._draw_text("created", x + int(width * 0.55), y + 3, self.tiny_font, (150, 162, 188))
+        self._draw_text("biomass", x + int(width * 0.68), y + 3, self.tiny_font, (150, 162, 188))
+        self._draw_text("strategy", x + int(width * 0.80), y + 3, self.tiny_font, (150, 162, 188))
+        y += 24
+
+        content_bottom = modal.bottom - 48
+        if not rows:
+            self._draw_text("No life has appeared yet.", x, y, self.tiny_font, (150, 160, 184))
+        else:
+            visible_rows = max(1, (content_bottom - y) // 19)
+            for depth, species in rows[:visible_rows]:
+                y = self._draw_life_tree_row(species, depth, x, y, width)
+            remaining = len(rows) - visible_rows
+            if remaining > 0 and y <= content_bottom - 14:
+                self._draw_text(f"… {remaining} older/deeper lineages hidden", x, y, self.tiny_font, (150, 160, 184))
+
+        self._draw_text(
+            "Yellow rows are descendant branches; crimson rows are extinct lineages.",
+            x,
+            modal.bottom - 30,
+            self.tiny_font,
+            (155, 166, 190),
+        )
+
+    def _draw_life_tree_row(self, species, depth: int, x: int, y: int, width: int) -> int:
+        row_h = 19
+        rect = pygame.Rect(x, y - 1, width, row_h)
+        self.life_tree_modal_row_rects.append((rect, species.id))
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        selected = species.id == self.selected_species_id
+        is_descendant = species.parent_id is not None
+        if selected or hovered:
+            fill = (45, 56, 76) if selected else (30, 36, 50)
+            border = (135, 176, 150) if selected else (72, 84, 108)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=5)
+            pygame.draw.rect(self.screen, border, rect, 1, border_radius=5)
+
+        indent = min(155, max(0, int(depth)) * 18)
+        swatch = pygame.Rect(x + 8 + indent, y + 4, 10, 10)
+        pygame.draw.rect(self.screen, species.color, swatch)
+        pygame.draw.rect(self.screen, (92, 100, 122), swatch, 1)
+
+        if species.is_extinct:
+            text_color = EXTINCT_CRIMSON
+        elif is_descendant:
+            text_color = (255, 218, 92)
+        elif selected:
+            text_color = (238, 246, 240)
+        else:
+            text_color = (192, 202, 222)
+
+        branch_mark = "↳ " if is_descendant else "• "
+        extinct_mark = "† " if species.is_extinct else ""
+        name = f"{branch_mark}{extinct_mark}{species.name}"
+        total = self.planet.species_total_population(species.id)
+        strategy = self.planet.species_strategy_label(species)
+        self._draw_text(self._clip_text(name, max(12, (int(width * 0.52) - indent) // 7)), x + 22 + indent, y + 1, self.tiny_font, text_color)
+        self._draw_text(f"t{species.created_tick}", x + int(width * 0.55), y + 1, self.tiny_font, text_color)
+        self._draw_text(f"{total:.1f}", x + int(width * 0.68), y + 1, self.tiny_font, text_color)
+        self._draw_text(self._clip_text(strategy, max(10, int(width * 0.18) // 7)), x + int(width * 0.80), y + 1, self.tiny_font, text_color)
+        return y + row_h
 
     def _draw_checkbox_row(self, rect: pygame.Rect, label: str, checked: bool) -> None:
         hovered = rect.collidepoint(pygame.mouse.get_pos())

@@ -90,14 +90,26 @@ bouton Fullscreen/Window dans le panneau de droite
 bouton View: 2D/3D dans le panneau de droite
 bouton Life: off/biomass/dominant dans le panneau de droite
 bouton Weather: off/clouds/rain/all dans le panneau de droite
+bouton Panel: wide/narrow pour passer le panneau en 2 colonnes
+bouton Hide panel pour replier complètement le panneau
 g      bascule rendu carte 2D / planète 3D
 o      cycle aussi le life overlay
 w      cycle aussi le weather overlay
+p      bascule panneau étroit / large
+h      masque/réaffiche le panneau
 r      nouvelle planète, seed aléatoire
 s      capture d’écran
 q/esc  quitter
 ```
 
+
+## Panneau d’observation
+
+Le panneau runtime peut maintenant être élargi avec `Panel: wide` ou la touche `p`. En mode large, les sections passent en deux colonnes : informations générales à gauche, vie/zone/lignée à droite. `Hide panel` ou la touche `h` replie complètement le panneau pour observer la planète ; un petit onglet `Panel` le réouvre.
+
+Le bouton global affiche maintenant simplement `Life tree` pour garder la barre haute lisible. Les détails restent dans la modale.
+
+La card d’une lignée sélectionnée affiche aussi une petite **specimen impression** : c’est une vignette procédurale et narrative dérivée des traits héritables. Elle ne crée pas d’individus dans la simulation ; elle sert seulement à donner une identité visuelle stable à une lignée populationnelle.
 
 ## Rendu 2D / 3D
 
@@ -450,3 +462,17 @@ Phase 6 ajoute une mobilité encore abstraite, mais plus directionnelle que la s
 ```
 
 Ce n'est toujours pas un modèle d'individus. Une lignée reste un champ de population. L'objectif est de rendre la géographie plus importante : îles, côtes, fronts d'expansion et niches séparées doivent commencer à produire des branches généalogiques plus lisibles.
+
+## Phase 6 observer polish — defaults and global life tree
+
+This patch changes the observer defaults and makes lineage history easier to inspect:
+
+- the runtime opens in `View: 3D` by default;
+- the runtime uses `Weather: all` by default;
+- species-related rows in the event summary are clickable;
+- clicking a birth, extinction or descendant branch event selects the related lineage and recenters the inspected zone when the event has coordinates;
+- once the first lineage exists, a top-panel `Open global life tree` button appears;
+- the global life tree modal shows root lineages, descendants, extinct rows and current biomass;
+- descendant rows are shown in yellow, extinct rows in crimson.
+
+The global life tree is still observational only. It does not change population dynamics.
