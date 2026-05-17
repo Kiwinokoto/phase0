@@ -98,15 +98,39 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
     ),
     "fertility": LayerLegend(
         title="Fertility",
-        description=("Composite future proto-life", "potential, penalized by toxicity."),
+        description=("Composite proto-life potential,", "penalized by toxicity."),
         colors=((28, 22, 18), (65, 120, 68), (165, 220, 92)),
         labels=("hostile", "viable", "promising"),
+    ),
+    "dead_matter": LayerLegend(
+        title="Dead matter",
+        description=("Recycled biomass from failed", "or dying proto-lineages."),
+        colors=((20, 16, 12), (115, 76, 38), (225, 170, 80)),
+        labels=("none", "debris", "rich"),
+    ),
+    "biomass": LayerLegend(
+        title="Biomass",
+        description=("Total living proto-life", "population density."),
+        colors=((10, 14, 12), (35, 130, 65), (180, 245, 120)),
+        labels=("empty", "alive", "dense"),
+    ),
+    "diversity": LayerLegend(
+        title="Diversity",
+        description=("Local number of coexisting", "lineages, normalized."),
+        colors=((16, 14, 26), (60, 105, 160), (230, 210, 110)),
+        labels=("single/none", "mixed", "diverse"),
+    ),
+    "dominant_life": LayerLegend(
+        title="Dominant life",
+        description=("Color = dominant lineage.", "Brightness = biomass density."),
+        colors=((8, 10, 12), (95, 160, 120), (240, 240, 180)),
+        labels=("barren", "lineage", "dense"),
     ),
 }
 
 
 class PlanetViewer:
-    """Small Pygame viewer for Phase 2 dynamic abiotic maps."""
+    """Small Pygame viewer for Phase 3 proto-life maps."""
 
     layers: tuple[LayerName, ...] = (
         "biome",
@@ -121,6 +145,10 @@ class PlanetViewer:
         "chemical_energy",
         "toxicity",
         "fertility",
+        "dead_matter",
+        "biomass",
+        "diversity",
+        "dominant_life",
     )
 
     def __init__(self, planet: Planet, scale: int = 4) -> None:
@@ -140,7 +168,7 @@ class PlanetViewer:
         self.side_panel_width = 380
         self.windowed_size = (self.base_map_size[0] + self.side_panel_width, self.base_map_size[1])
         self.screen = pygame.display.set_mode(self.windowed_size)
-        pygame.display.set_caption("Artificial Life Sandbox — Phase 2")
+        pygame.display.set_caption("Artificial Life Sandbox — Phase 3")
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
@@ -271,7 +299,7 @@ class PlanetViewer:
 
         x = panel.left + 18
         y = 18
-        self._draw_text("Phase 2 — Dynamic Abiotic Planet", x, y, self.font, (235, 238, 245))
+        self._draw_text("Phase 3 — First Proto-Life", x, y, self.font, (235, 238, 245))
         y += 30
 
         y = self._draw_settings_row(x, y)
@@ -310,23 +338,56 @@ class PlanetViewer:
             f"humidity/light: {self.planet.humidity.mean():.2f} / {self.planet.light.mean():.2f}",
             f"nutrients/chem: {self.planet.nutrients.mean():.2f} / {self.planet.chemical_energy.mean():.2f}",
             f"tox/fertility: {self.planet.toxicity.mean():.2f} / {self.planet.fertility.mean():.2f}",
+            f"dead/biomass: {self.planet.dead_matter.mean():.3f} / {self.planet.biomass.mean():.3f}",
         ):
             self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
             y += 14
 
-        y += 12
+        y += 8
+        self._draw_text("Life stats:", x, y, self.small_font, (235, 238, 245))
+        y += 16
+        for line in (
+            f"living/extinct: {self.planet.living_species_count} / {self.planet.extinction_count}",
+            f"total biomass: {self.planet.total_biomass:.2f}",
+            f"tracked lineages: {len(self.planet.species)}/{self.planet.config.max_species}",
+        ):
+            self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
+            y += 14
+
+        y = self._draw_top_species(x, y + 4)
+
+        y += 10
         y = self._draw_current_layer_legend(x, y)
 
         # Keep the phase note pinned near the bottom when there is enough space.
-        note_y = max(y + 12, panel.bottom - 68)
+        note_y = max(y + 12, panel.bottom - 54)
         for line in (
-            "Phase 2 still has no life yet.",
-            "Abiotic fields now change over time.",
-            "Phase 3 will add proto-replicators.",
+            "Life is still abstract population fields.",
+            "No plants/animals are hard-coded yet.",
         ):
             if note_y + 14 < panel.bottom:
                 self._draw_text(line, x, note_y, self.tiny_font, (165, 172, 190))
                 note_y += 14
+
+    def _draw_top_species(self, x: int, y: int) -> int:
+        top = self.planet.top_species(limit=3)
+        if not top:
+            self._draw_text("Top lineages: none yet", x, y, self.tiny_font, (165, 172, 190))
+            return y + 16
+
+        self._draw_text("Top lineages:", x, y, self.small_font, (235, 238, 245))
+        y += 16
+        for species, total in top:
+            color_rect = pygame.Rect(x, y + 2, 10, 10)
+            pygame.draw.rect(self.screen, species.color, color_rect)
+            pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
+            status = "†" if species.is_extinct else ""
+            label = f"{species.name}{status} {total:.1f} {self.planet.species_strategy_label(species)}"
+            if len(label) > 43:
+                label = label[:40] + "..."
+            self._draw_text(label, x + 16, y, self.tiny_font, (185, 192, 210))
+            y += 14
+        return y
 
     def _draw_settings_row(self, x: int, y: int) -> int:
         button_w = min(180, self.panel_rect.width - 36)
@@ -453,7 +514,35 @@ def render_layer(planet: Planet, layer: LayerName) -> np.ndarray:
         return _three_color_gradient(planet.toxicity, (18, 22, 20), (90, 70, 130), (210, 55, 85))
     if layer == "fertility":
         return _three_color_gradient(planet.fertility, (28, 22, 18), (65, 120, 68), (165, 220, 92))
+    if layer == "dead_matter":
+        return _three_color_gradient(planet.dead_matter, (20, 16, 12), (115, 76, 38), (225, 170, 80))
+    if layer == "biomass":
+        return _three_color_gradient(planet.biomass, (10, 14, 12), (35, 130, 65), (180, 245, 120))
+    if layer == "diversity":
+        return _three_color_gradient(planet.diversity, (16, 14, 26), (60, 105, 160), (230, 210, 110))
+    if layer == "dominant_life":
+        return _render_dominant_life(planet)
     raise ValueError(f"Unknown layer: {layer}")
+
+
+def _render_dominant_life(planet: Planet) -> np.ndarray:
+    h, w = planet.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    if not planet.species:
+        return rgb
+
+    # Dark biome background helps barren areas stay readable.
+    background = (_render_biome(planet).astype(np.float32) * 0.18).astype(np.uint8)
+    rgb[:] = background
+    biomass = np.clip(planet.biomass, 0.0, 1.0)
+    brightness = (0.25 + 0.75 * biomass)[..., None]
+    for index, species in enumerate(planet.species):
+        mask = planet.dominant_species_index == index
+        if not np.any(mask):
+            continue
+        color = np.array(species.color, dtype=np.float32)
+        rgb[mask] = np.clip(color * brightness[mask], 0, 255).astype(np.uint8)
+    return rgb
 
 
 def _render_biome(planet: Planet) -> np.ndarray:
@@ -519,7 +608,7 @@ def random_seed() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 2")
+    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 3")
     parser.add_argument(
         "--seed",
         type=int,

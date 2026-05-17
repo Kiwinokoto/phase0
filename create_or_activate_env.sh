@@ -21,7 +21,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   exit 1
 fi
 
-ENV_NAME="${ALIFE_CONDA_ENV:-alife_phase2}"
+ENV_NAME="${ALIFE_CONDA_ENV:-alife_phase3}"
 PYTHON_VERSION="${ALIFE_PYTHON_VERSION:-3.11}"
 INSTALL_MODE="auto" # auto | never | always
 
@@ -49,7 +49,7 @@ Usage:
   source ./create_or_activate_env.sh [options]
 
 Options:
-  -n, --name NAME     Conda environment name. Default: alife_phase2
+  -n, --name NAME     Conda environment name. Default: alife_phase3
   --python VERSION    Python version when creating the env. Default: 3.11
   --no-install        Activate only; do not install dependencies
   --force-install     Force pip install -r requirements.txt even if unchanged

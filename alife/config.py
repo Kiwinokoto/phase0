@@ -7,9 +7,9 @@ from dataclasses import dataclass
 class PlanetConfig:
     """Configuration for a generated 2D planet.
 
-    Phase 2 keeps the world deliberately abiotic: no life yet. The planet is
-    now dynamic, so resources, chemical energy, toxicity, light, temperature,
-    and fertility evolve over time.
+    Phase 3 adds the first abstract life layer on top of the dynamic abiotic
+    planet: rare abiogenesis events, proto-lineages, population growth,
+    extinction, and light mutation-driven branching.
     """
 
     width: int = 256
@@ -40,7 +40,7 @@ class PlanetConfig:
     fertility_water_weight: float = 0.22
     fertility_temperature_weight: float = 0.20
 
-    # Phase 2 dynamics. Rates are per tick; step() scales them for fast-forward.
+    # Phase 2 abiotic dynamics. Rates are per tick; step() scales them for fast-forward.
     nutrient_diffusion_rate: float = 0.020
     nutrient_recharge_rate: float = 0.0025
     nutrient_leaching_rate: float = 0.0008
@@ -58,6 +58,28 @@ class PlanetConfig:
     volcanic_pulse_radius: float = 4.0
     volcanic_pulse_strength: float = 0.55
 
+
+    # Phase 3 proto-life. Populations are stored per lineage and per map cell;
+    # these are still abstract population fields, not individual organisms.
+    max_species: int = 64
+    abiogenesis_rate: float = 0.0060
+    abiogenesis_fertility_threshold: float = 0.50
+    initial_seed_population: float = 0.18
+
+    life_time_scale: float = 0.045
+    life_stress_rate: float = 0.09
+    life_crowding_rate: float = 0.30
+    life_resource_consumption_rate: float = 0.003
+    life_dispersal_rate: float = 0.018
+
+    dead_matter_diffusion_rate: float = 0.012
+    dead_matter_decay_rate: float = 0.003
+    dead_matter_recycling_rate: float = 0.55
+
+    speciation_rate: float = 0.000075
+    mutation_strength: float = 0.09
+    extinction_population_threshold: float = 0.010
+
     # Visual/simulation clock
     initial_speed: int = 1
 
@@ -74,5 +96,11 @@ class PlanetConfig:
             raise ValueError("seasonal_period_ticks must be >= 10.")
         if self.volcanic_pulse_radius <= 0:
             raise ValueError("volcanic_pulse_radius must be positive.")
+        if self.max_species < 1:
+            raise ValueError("max_species must be >= 1.")
+        if self.abiogenesis_rate < 0.0:
+            raise ValueError("abiogenesis_rate must be >= 0.")
+        if not 0.0 <= self.abiogenesis_fertility_threshold <= 1.0:
+            raise ValueError("abiogenesis_fertility_threshold must be between 0 and 1.")
         if self.initial_speed < 1:
             raise ValueError("initial_speed must be >= 1.")

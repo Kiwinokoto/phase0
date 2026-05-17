@@ -1,23 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
 from .config import PlanetConfig
 from .noise import fractal_noise_2d
+from .life import (
+    LifeSpecies,
+    infer_strategy_label,
+    make_species_name,
+    mutate_traits,
+    seed_traits_from_environment,
+    species_color,
+)
 
 
 @dataclass
 class Planet:
-    """Generated 2D planet fields for Phase 2.
+    """Generated 2D planet fields for Phase 3.
 
     Field shapes are always (height, width). Values are normalized to [0, 1]
-    except temperature_c.
-
-    Phase 2 still has no life. It turns the abiotic planet into a dynamic
-    system: seasons, diffusion, recharge/decay, and volcanic pulses continually
-    reshape the future niches where proto-life will appear in Phase 3.
+    except temperature_c. Phase 3 keeps the abiotic dynamics from Phase 2 and
+    adds the first abstract proto-life: rare abiogenesis events, heritable
+    traits, population fields, death, extinction and mutation-driven branching.
     """
 
     config: PlanetConfig
@@ -39,6 +45,14 @@ class Planet:
     chemical_energy: np.ndarray
     toxicity: np.ndarray
     fertility: np.ndarray
+    dead_matter: np.ndarray
+    populations: np.ndarray
+    biomass: np.ndarray
+    diversity: np.ndarray
+    dominant_species_index: np.ndarray
+    species: list[LifeSpecies] = field(default_factory=list)
+    next_species_id: int = 1
+    extinction_count: int = 0
     tick: int = 0
 
     @classmethod
@@ -73,6 +87,11 @@ class Planet:
             chemical_energy=chemical_energy,
             toxicity=toxicity,
         )
+        dead_matter = np.zeros_like(fertility, dtype=np.float32)
+        populations = np.zeros((config.max_species, config.height, config.width), dtype=np.float32)
+        biomass = np.zeros_like(fertility, dtype=np.float32)
+        diversity = np.zeros_like(fertility, dtype=np.float32)
+        dominant_species_index = np.full_like(fertility, -1, dtype=np.int16)
 
         return cls(
             config=config,
@@ -94,19 +113,39 @@ class Planet:
             chemical_energy=chemical_energy,
             toxicity=toxicity,
             fertility=fertility,
+            dead_matter=dead_matter,
+            populations=populations,
+            biomass=biomass,
+            diversity=diversity,
+            dominant_species_index=dominant_species_index,
         )
 
     @property
     def shape(self) -> tuple[int, int]:
         return self.elevation.shape
 
-    def step(self, steps: int = 1) -> None:
-        """Advance abiotic dynamics by `steps` simulation ticks.
+    @property
+    def living_species_count(self) -> int:
+        return sum(1 for species in self.species if not species.is_extinct)
 
-        Fast-forward is handled as a macro-step, not thousands of tiny loops.
-        This keeps the viewer responsive while preserving the direction of the
-        processes: diffusion smooths, sources recharge, unstable fields decay,
-        and volcanic pulses inject temporary energy/toxicity hotspots.
+    @property
+    def total_biomass(self) -> float:
+        return float(self.biomass.sum())
+
+    def top_species(self, limit: int = 5) -> list[tuple[LifeSpecies, float]]:
+        totals: list[tuple[LifeSpecies, float]] = []
+        for index, species in enumerate(self.species):
+            total = float(self.populations[index].sum())
+            if total > 0.0 or not species.is_extinct:
+                totals.append((species, total))
+        totals.sort(key=lambda item: item[1], reverse=True)
+        return totals[: max(0, limit)]
+
+    def step(self, steps: int = 1) -> None:
+        """Advance abiotic and proto-life dynamics by `steps` simulation ticks.
+
+        Abiotic fields still use macro-steps. Life uses a few bounded internal
+        substeps so population growth remains stable during fast-forward.
         """
         steps = int(steps)
         if steps < 1:
@@ -117,6 +156,10 @@ class Planet:
         self._update_volcanism(steps)
         self._update_resources(steps)
         self._update_fertility()
+        self._maybe_seed_abiogenesis(steps)
+        self._update_life(steps)
+        self._maybe_branch_lineages(steps)
+        self._update_biomass_maps()
 
     def regenerate(self, seed: int | None = None) -> "Planet":
         """Return a new planet with a new or explicit seed."""
@@ -178,6 +221,15 @@ class Planet:
         self.volcanic_pulses += (self.config.volcanic_pulse_strength * bump).astype(np.float32)
 
     def _update_resources(self, steps: int) -> None:
+        # Dead biomass slowly returns soluble nutrients. Extra recycling is also
+        # handled during life substeps, but this keeps paused-low-biomass fields
+        # chemically active between major population changes.
+        if float(self.dead_matter.max()) > 0.0:
+            recycled = self.dead_matter * (1.0 - _decay_factor(self.config.dead_matter_decay_rate * 0.35, steps))
+            self.dead_matter -= recycled
+            self.nutrients += (self.config.dead_matter_recycling_rate * 0.55 * recycled).astype(np.float32)
+            self.dead_matter = np.clip(self.dead_matter, 0.0, 1.0).astype(np.float32)
+
         dynamic_nutrient_source = np.clip(
             self.nutrient_source
             + 0.10 * _blur4(self.minerals * self.humidity * self.land.astype(np.float32), passes=2)
@@ -233,6 +285,248 @@ class Planet:
             chemical_energy=self.chemical_energy,
             toxicity=self.toxicity,
         )
+
+    def _water_access(self) -> np.ndarray:
+        shallow_water = np.clip(self.water * 1.45, 0.0, 1.0)
+        return np.where(self.land, self.humidity, 0.45 + 0.55 * shallow_water).astype(np.float32)
+
+    def _maybe_seed_abiogenesis(self, steps: int) -> None:
+        if len(self.species) >= self.config.max_species:
+            return
+
+        viable = np.clip(self.fertility - self.config.abiogenesis_fertility_threshold, 0.0, 1.0)
+        if float(viable.max()) <= 0.0:
+            return
+
+        expected = self.config.abiogenesis_rate * max(1, steps)
+        event_count = int(self.rng.poisson(expected))
+        if event_count <= 0:
+            return
+
+        event_count = min(event_count, 3, self.config.max_species - len(self.species))
+        weights = (viable ** 2) * (0.25 + self.nutrients + 0.65 * self.chemical_energy) * (1.0 - 0.65 * self.toxicity)
+        weights = np.clip(weights, 0.0, None).astype(np.float64)
+        total_weight = float(weights.sum())
+        if total_weight <= 0.0:
+            return
+        weights /= total_weight
+
+        height, width = self.shape
+        flat_indices = self.rng.choice(weights.size, size=event_count, replace=True, p=weights.ravel())
+        for flat_index in np.atleast_1d(flat_indices):
+            if len(self.species) >= self.config.max_species:
+                break
+            y, x = divmod(int(flat_index), width)
+            self._create_seed_species(y, x)
+
+    def _create_seed_species(self, y: int, x: int) -> None:
+        species_id = self.next_species_id
+        self.next_species_id += 1
+        water_access = float(self._water_access()[y, x])
+        traits = seed_traits_from_environment(
+            self.rng,
+            temperature_c=float(self.temperature_c[y, x]),
+            water_access=water_access,
+            light=float(self.light[y, x]),
+            chemical_energy=float(self.chemical_energy[y, x]),
+            dead_matter=float(self.dead_matter[y, x]),
+            toxicity=float(self.toxicity[y, x]),
+        )
+        species = LifeSpecies(
+            id=species_id,
+            parent_id=None,
+            name=make_species_name(self.rng, species_id),
+            color=species_color(traits),
+            traits=traits,
+            created_tick=self.tick,
+        )
+        index = len(self.species)
+        self.species.append(species)
+        self._add_population_blob(index, y, x, self.config.initial_seed_population, radius=2.3)
+
+    def _add_population_blob(self, index: int, y0: int, x0: int, amount: float, radius: float) -> None:
+        height, width = self.shape
+        y = np.arange(height, dtype=np.float32)[:, None]
+        x = np.arange(width, dtype=np.float32)[None, :]
+        dx = np.abs(x - float(x0))
+        dx = np.minimum(dx, float(width) - dx)
+        dy = y - float(y0)
+        bump = np.exp(-(dx * dx + dy * dy) / (2.0 * radius * radius))
+        self.populations[index] += (amount * bump).astype(np.float32)
+        self.populations[index] = np.clip(self.populations[index], 0.0, 1.0).astype(np.float32)
+
+    def _update_life(self, steps: int) -> None:
+        if not self.species:
+            return
+
+        # Keep large fast-forward steps stable without doing one Python loop per tick.
+        chunks = max(1, min(48, int(np.ceil(steps / 32))))
+        dt = max(1.0, float(steps) / float(chunks))
+        for _ in range(chunks):
+            self._update_dead_matter(dt)
+            water_access = self._water_access()
+            biomass_before = np.clip(self.populations[: len(self.species)].sum(axis=0), 0.0, 1.0)
+
+            for index, species in enumerate(self.species):
+                if species.is_extinct:
+                    continue
+                pop = self.populations[index]
+                if float(pop.sum()) <= 0.0:
+                    self._mark_extinct_if_needed(index)
+                    continue
+
+                traits = species.traits
+                temp_fit = np.exp(-((self.temperature_c - traits.temperature_optimum_c) / traits.temperature_tolerance_c) ** 2)
+                water_fit = np.clip(
+                    1.0 - np.abs(water_access - traits.water_preference) / traits.water_tolerance,
+                    0.0,
+                    1.0,
+                )
+                tox_over = np.maximum(0.0, self.toxicity - traits.toxicity_tolerance)
+                tox_fit = np.clip(1.0 - tox_over / max(1.0 - traits.toxicity_tolerance, 0.05), 0.0, 1.0)
+                habitat_fit = temp_fit * water_fit * tox_fit
+
+                photo_energy = traits.photosynthesis * self.light * self.nutrients * water_fit
+                chemo_energy = traits.chemosynthesis * self.chemical_energy * (0.25 + 0.75 * self.minerals)
+                organic_energy = traits.organic_absorption * self.dead_matter
+                energy_gain = photo_energy + chemo_energy + organic_energy
+
+                growth = traits.reproduction_rate * energy_gain * habitat_fit
+                stress = self.config.life_stress_rate * (1.0 - habitat_fit)
+                crowding = self.config.life_crowding_rate * biomass_before
+                net = growth - traits.metabolism_cost - stress - crowding
+
+                multiplier = np.exp(np.clip(net * dt * self.config.life_time_scale, -0.75, 0.55))
+                updated = np.clip(pop * multiplier, 0.0, 1.0).astype(np.float32)
+                if traits.dispersal > 0.0:
+                    updated = _diffuse(
+                        updated,
+                        self.config.life_dispersal_rate * traits.dispersal,
+                        max(1, int(round(dt))),
+                    ).astype(np.float32)
+
+                deaths = np.maximum(pop - updated, 0.0)
+                growth_amount = np.maximum(updated - pop, 0.0)
+                self.dead_matter += (0.35 * deaths).astype(np.float32)
+
+                resource_use = self.config.life_resource_consumption_rate * growth_amount
+                self.nutrients -= resource_use * (0.60 * traits.photosynthesis + 0.35 * traits.organic_absorption)
+                self.chemical_energy -= resource_use * (0.85 * traits.chemosynthesis)
+                self.dead_matter -= resource_use * (0.50 * traits.organic_absorption)
+
+                updated[updated < 1e-5] = 0.0
+                self.populations[index] = np.clip(updated, 0.0, 1.0).astype(np.float32)
+                species.population_peak = max(species.population_peak, float(self.populations[index].sum()))
+                self._mark_extinct_if_needed(index)
+
+            # During fast-forward, abiotic recharge must continue while life consumes
+            # resources; otherwise one macro-step lets populations strip the map
+            # before the next environmental recharge.
+            recharge_steps = max(1, int(round(dt)))
+            self.nutrients = _relax_to_source(
+                self.nutrients,
+                self.nutrient_source,
+                self.config.nutrient_recharge_rate * 0.75,
+                recharge_steps,
+            )
+            self.chemical_energy = _relax_to_source(
+                self.chemical_energy,
+                _generate_chemical_energy(self.config, self.volcanism, self.water),
+                self.config.chemical_energy_recharge_rate * 0.55,
+                recharge_steps,
+            )
+            self.nutrients = np.clip(self.nutrients, 0.0, 1.0).astype(np.float32)
+            self.chemical_energy = np.clip(self.chemical_energy, 0.0, 1.0).astype(np.float32)
+            self.dead_matter = np.clip(self.dead_matter, 0.0, 1.0).astype(np.float32)
+
+    def _update_dead_matter(self, dt: float) -> None:
+        if float(self.dead_matter.max()) <= 0.0:
+            return
+        steps = max(1, int(round(dt)))
+        decay_amount = self.dead_matter * (1.0 - _decay_factor(self.config.dead_matter_decay_rate, steps))
+        self.dead_matter -= decay_amount
+        self.nutrients += (self.config.dead_matter_recycling_rate * decay_amount).astype(np.float32)
+        self.dead_matter = _diffuse(self.dead_matter, self.config.dead_matter_diffusion_rate, steps)
+        self.dead_matter = np.clip(self.dead_matter, 0.0, 1.0).astype(np.float32)
+
+    def _mark_extinct_if_needed(self, index: int) -> None:
+        species = self.species[index]
+        if species.is_extinct:
+            return
+        total = float(self.populations[index].sum())
+        if total <= self.config.extinction_population_threshold and self.tick > species.created_tick + 80:
+            species.extinct_tick = self.tick
+            self.populations[index].fill(0.0)
+            self.extinction_count += 1
+
+    def _maybe_branch_lineages(self, steps: int) -> None:
+        if len(self.species) >= self.config.max_species or not self.species:
+            return
+
+        living_indices = [i for i, species in enumerate(self.species) if not species.is_extinct]
+        if not living_indices:
+            return
+
+        totals = np.array([float(self.populations[i].sum()) for i in living_indices], dtype=np.float64)
+        mutation_rates = np.array([self.species[i].traits.mutation_rate for i in living_indices], dtype=np.float64)
+        weights = totals * mutation_rates
+        total_weight = float(weights.sum())
+        if total_weight <= 2.0:
+            return
+
+        expected = self.config.speciation_rate * max(1, steps) * min(12.0, total_weight / 28.0)
+        event_count = int(self.rng.poisson(expected))
+        if event_count <= 0:
+            return
+        event_count = min(event_count, 2, self.config.max_species - len(self.species))
+        weights /= total_weight
+
+        for _ in range(event_count):
+            if len(self.species) >= self.config.max_species:
+                break
+            parent_index = int(self.rng.choice(living_indices, p=weights))
+            parent_pop = self.populations[parent_index]
+            if float(parent_pop.max()) <= 0.02:
+                continue
+            flat_index = int(np.argmax(parent_pop))
+            y, x = divmod(flat_index, self.config.width)
+            self._create_mutant_species(parent_index, y, x)
+
+    def _create_mutant_species(self, parent_index: int, y: int, x: int) -> None:
+        parent = self.species[parent_index]
+        species_id = self.next_species_id
+        self.next_species_id += 1
+        traits = mutate_traits(self.rng, parent.traits, self.config.mutation_strength)
+        species = LifeSpecies(
+            id=species_id,
+            parent_id=parent.id,
+            name=make_species_name(self.rng, species_id),
+            color=species_color(traits),
+            traits=traits,
+            created_tick=self.tick,
+        )
+        index = len(self.species)
+        self.species.append(species)
+        seed_amount = float(np.clip(self.populations[parent_index, y, x] * 0.35, 0.025, 0.12))
+        self._add_population_blob(index, y, x, seed_amount, radius=2.0)
+        self.populations[parent_index, y, x] *= 0.92
+
+    def _update_biomass_maps(self) -> None:
+        if not self.species:
+            self.biomass.fill(0.0)
+            self.diversity.fill(0.0)
+            self.dominant_species_index.fill(-1)
+            return
+
+        active = self.populations[: len(self.species)]
+        self.biomass = np.clip(active.sum(axis=0), 0.0, 1.0).astype(np.float32)
+        self.diversity = np.clip((active > 0.01).sum(axis=0) / max(1, min(8, len(self.species))), 0.0, 1.0).astype(np.float32)
+        dominant = np.argmax(active, axis=0).astype(np.int16)
+        dominant[self.biomass <= 0.01] = -1
+        self.dominant_species_index = dominant
+
+    def species_strategy_label(self, species: LifeSpecies) -> str:
+        return infer_strategy_label(species.traits)
 
 
 def _generate_elevation(config: PlanetConfig, rng: np.random.Generator) -> np.ndarray:

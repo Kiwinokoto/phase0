@@ -18,6 +18,9 @@ NORMALIZED_FIELD_NAMES = [
     "chemical_energy",
     "toxicity",
     "fertility",
+    "dead_matter",
+    "biomass",
+    "diversity",
 ]
 
 DYNAMIC_FIELD_NAMES = [
@@ -28,6 +31,9 @@ DYNAMIC_FIELD_NAMES = [
     "chemical_energy",
     "toxicity",
     "fertility",
+    "dead_matter",
+    "biomass",
+    "diversity",
 ]
 
 STATIC_FIELD_NAMES = [
@@ -52,6 +58,8 @@ def test_planet_shapes_are_consistent():
     assert planet.land.shape == (48, 96)
     assert planet.temperature_c.shape == (48, 96)
     assert planet.base_temperature_c.shape == (48, 96)
+    assert planet.populations.shape == (config.max_species, 48, 96)
+    assert planet.dominant_species_index.shape == (48, 96)
 
 
 def test_normalized_fields_stay_in_expected_range():
@@ -91,6 +99,7 @@ def test_generation_is_deterministic_for_same_seed():
     for name in NORMALIZED_FIELD_NAMES:
         np.testing.assert_allclose(getattr(p1, name), getattr(p2, name))
     np.testing.assert_allclose(p1.temperature_c, p2.temperature_c)
+    np.testing.assert_allclose(p1.populations, p2.populations)
 
 
 def test_regenerate_changes_seed():
@@ -179,3 +188,74 @@ def test_same_seed_evolves_deterministically_for_same_steps():
     assert p1.tick == p2.tick
     for name in DYNAMIC_FIELD_NAMES:
         np.testing.assert_allclose(getattr(p1, name), getattr(p2, name), err_msg=name)
+    np.testing.assert_allclose(p1.populations, p2.populations)
+    assert [s.name for s in p1.species] == [s.name for s in p2.species]
+
+
+def test_phase3_starts_without_life_but_has_life_capacity():
+    config = PlanetConfig(width=96, height=48, seed=808)
+    planet = Planet.generate(config)
+
+    assert planet.species == []
+    assert planet.living_species_count == 0
+    assert planet.total_biomass == 0.0
+    assert planet.populations.shape == (config.max_species, 48, 96)
+
+
+def test_abiogenesis_creates_proto_lineages_in_fertile_world():
+    config = PlanetConfig(
+        width=96,
+        height=48,
+        seed=909,
+        abiogenesis_rate=0.20,
+        abiogenesis_fertility_threshold=0.25,
+    )
+    planet = Planet.generate(config)
+    planet.step(500)
+
+    assert len(planet.species) > 0
+    assert planet.living_species_count > 0
+    assert planet.total_biomass > 0.0
+    assert float(planet.biomass.max()) > 0.0
+
+
+def test_life_fields_remain_bounded_after_many_steps():
+    config = PlanetConfig(
+        width=96,
+        height=48,
+        seed=1001,
+        abiogenesis_rate=0.08,
+        abiogenesis_fertility_threshold=0.30,
+    )
+    planet = Planet.generate(config)
+    for _ in range(6):
+        planet.step(700)
+
+    assert len(planet.species) <= config.max_species
+    assert float(planet.populations.min()) >= 0.0
+    assert float(planet.populations.max()) <= 1.0
+    assert float(planet.biomass.min()) >= 0.0
+    assert float(planet.biomass.max()) <= 1.0
+    assert float(planet.diversity.min()) >= 0.0
+    assert float(planet.diversity.max()) <= 1.0
+
+
+def test_life_evolution_is_deterministic_for_same_seed():
+    config = PlanetConfig(
+        width=96,
+        height=48,
+        seed=1112,
+        abiogenesis_rate=0.08,
+        abiogenesis_fertility_threshold=0.30,
+    )
+    p1 = Planet.generate(config)
+    p2 = Planet.generate(config)
+
+    for steps in (100, 300, 900, 1500):
+        p1.step(steps)
+        p2.step(steps)
+
+    assert len(p1.species) == len(p2.species)
+    assert [s.name for s in p1.species] == [s.name for s in p2.species]
+    np.testing.assert_allclose(p1.populations, p2.populations)
+    np.testing.assert_allclose(p1.biomass, p2.biomass)
