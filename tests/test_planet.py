@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 import pygame
 
@@ -1045,3 +1047,13 @@ def test_panel_toggle_source_controls_exist_without_opening_window():
     assert "Panel: wide" in source
     assert "Panel: narrow" in source
     assert "Hide panel" in source
+
+
+def test_panel_width_modes_control_section_visibility_without_opening_window():
+    source = inspect.getsource(PlanetViewer.__init__) + inspect.getsource(PlanetViewer._toggle_panel_width) + inspect.getsource(PlanetViewer._draw_panel)
+
+    assert "all_runtime_section_keys" in source
+    assert 'self.collapsed_sections = {"legend"}' in source
+    assert "self.collapsed_sections = set(self.all_runtime_section_keys)" in source
+    assert "self._draw_life_summary" in source
+    assert "self._draw_current_layer_legend" in source

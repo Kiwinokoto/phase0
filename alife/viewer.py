@@ -307,7 +307,18 @@ class PlanetViewer:
         self.setup_slider_rects: list[tuple[pygame.Rect, str]] = []
         self.active_setup_slider: tuple[str, pygame.Rect] | None = None
         self.section_header_rects: list[tuple[pygame.Rect, str]] = []
-        self.collapsed_sections: set[str] = {"simulation", "planet", "life", "legend"}
+        # Narrow mode is the compact observer deck: every section starts folded.
+        # Wide mode expands the working sections and keeps only the legend folded.
+        self.all_runtime_section_keys: set[str] = {
+            "simulation",
+            "events",
+            "planet",
+            "life",
+            "zone",
+            "lineage",
+            "legend",
+        }
+        self.collapsed_sections: set[str] = set(self.all_runtime_section_keys)
 
         self.font = pygame.font.SysFont("monospace", 16)
         self.layer_font = pygame.font.SysFont("monospace", 20, bold=True)
@@ -617,9 +628,11 @@ class PlanetViewer:
         if self.panel_layout_mode == "wide":
             self.panel_layout_mode = "narrow"
             self.side_panel_width = self.panel_narrow_width
+            self.collapsed_sections = set(self.all_runtime_section_keys)
         else:
             self.panel_layout_mode = "wide"
             self.side_panel_width = self.panel_wide_width
+            self.collapsed_sections = {"legend"}
         self.panel_collapsed = False
         self._update_layout()
         self._invalidate_cache()
@@ -758,10 +771,6 @@ class PlanetViewer:
         y = self._draw_compact_controls(x, y, content_w)
         y += 10
 
-        legend_height = 36 if self._is_collapsed("legend") else 178
-        legend_y = max(y + 250, panel.bottom - legend_height)
-        section_limit = legend_y - 12
-
         if content_w >= 620:
             gap = 16
             col_w = (content_w - gap) // 2
@@ -769,17 +778,33 @@ class PlanetViewer:
             right_x = x + col_w + gap
             left_y = y
             right_y = y
-            for draw_section in (self._draw_simulation_summary, self._draw_event_log, self._draw_planet_summary):
+            section_limit = panel.bottom - 18
+
+            # Wide mode becomes a true two-column observer deck:
+            # left = global state, life overview and legend; right = local focus.
+            left_sections = (
+                self._draw_simulation_summary,
+                self._draw_event_log,
+                self._draw_planet_summary,
+                self._draw_life_summary,
+                self._draw_current_layer_legend,
+            )
+            right_sections = (self._draw_selected_zone, self._draw_selected_lineage)
+
+            for draw_section in left_sections:
                 if left_y > section_limit - 34:
                     self._draw_text("Collapse sections above to reveal more details.", left_x, left_y, self.tiny_font, (190, 170, 130))
                     break
                 left_y = draw_section(left_x, left_y, col_w) + 12
-            for draw_section in (self._draw_life_summary, self._draw_selected_zone, self._draw_selected_lineage):
+            for draw_section in right_sections:
                 if right_y > section_limit - 34:
                     self._draw_text("Collapse sections above to reveal more details.", right_x, right_y, self.tiny_font, (190, 170, 130))
                     break
                 right_y = draw_section(right_x, right_y, col_w) + 12
         else:
+            legend_height = 36 if self._is_collapsed("legend") else 178
+            legend_y = max(y + 250, panel.bottom - legend_height)
+            section_limit = legend_y - 12
             for draw_section in (
                 self._draw_simulation_summary,
                 self._draw_event_log,
@@ -795,7 +820,7 @@ class PlanetViewer:
                 y = draw_section(x, y, content_w)
                 y += 12
 
-        self._draw_current_layer_legend(x, legend_y, content_w)
+            self._draw_current_layer_legend(x, legend_y, content_w)
 
 
     def _draw_setup_panel(self, x: int, y: int, width: int) -> None:

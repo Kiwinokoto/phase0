@@ -105,7 +105,7 @@ q/esc  quitter
 
 ## Panneau d’observation
 
-Le panneau runtime peut maintenant être élargi avec `Panel: wide` ou la touche `p`. En mode large, les sections passent en deux colonnes : informations générales à gauche, vie/zone/lignée à droite. `Hide panel` ou la touche `h` replie complètement le panneau pour observer la planète ; un petit onglet `Panel` le réouvre.
+Le panneau runtime peut maintenant être élargi avec `Panel: wide` ou la touche `p`. En mode large, les sections passent en deux colonnes : infos globales, vie globale et légende à gauche ; inspection locale et lignée sélectionnée à droite. Le mode wide déplie automatiquement les sections de travail, sauf la légende. Le mode narrow replie toutes les sections pour garder un panneau compact. `Hide panel` ou la touche `h` replie complètement le panneau pour observer la planète ; un petit onglet `Panel` le réouvre.
 
 Le bouton global affiche maintenant simplement `Life tree` pour garder la barre haute lisible. Les détails restent dans la modale.
 
@@ -308,15 +308,12 @@ The right panel is now grouped from general to particular instead of being one l
 ```text
 1. Active layer
 2. Main buttons and compact controls
-3. Simulation status
-4. Planet averages
-5. Life summary and global top lineages
-6. Selected zone inspector
-7. Selected lineage / habitat card
-8. Current layer legend, pinned near the bottom
+3. Wide mode left column: Simulation, Event log, Planet averages, Life summary, Layer legend
+4. Wide mode right column: Selected zone, Selected lineage / habitat card
+5. Narrow mode: all sections folded by default
 ```
 
-Runtime sections are collapsible: click a section header to fold or unfold it. This keeps the panel usable as more ecology and lineage data is added. The legend stays available near the bottom because it explains the currently visible layer.
+Runtime sections are collapsible: click a section header to fold or unfold it. Wide mode is meant for active observation and unfolds most sections automatically; narrow mode is meant as a compact dashboard and folds everything.
 
 The panel also includes a compact event log for major observable events: abiogenesis, lineage branching, extinctions, and volcanic pulses.
 
@@ -381,7 +378,7 @@ After `Start simulation`, the right panel is ordered from general to particular:
 Simulation → Planet averages → Life summary → Selected zone → Selected lineage / habitat
 ```
 
-Click any section header to collapse or expand it. The layer legend remains pinned near the bottom of the panel so it does not get buried behind lineage details; it is collapsible too when you need extra room.
+Click any section header to collapse or expand it. In wide mode, the legend lives in the left column with the global information. In narrow mode, everything starts folded to keep the panel compact.
 
 
 ## Phase 4 finish polish
