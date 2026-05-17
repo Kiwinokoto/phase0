@@ -1,8 +1,8 @@
-# Artificial Life Sandbox — Phase 7
+# Artificial Life Sandbox — Phase 8
 
-Prototype Python minimal pour générer et observer une planète 2D/3D avec proto-vie abstraite, interactions écologiques, mobilité et colonisation.
+Prototype Python minimal pour générer et observer une planète 2D/3D avec proto-vie abstraite, interactions écologiques, mobilité, colonisation, morphologie et premiers événements planétaires.
 
-Phase 7 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle ajoute des traits morphologiques héritables — taille, structure, armure, vitesse, longévité, fragilité et complexité — tout en gardant une simulation par populations de lignées.
+Phase 8 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle garde les traits morphologiques héritables de Phase 7 et ajoute de premiers événements historiques globaux : coups de froid, périodes chaudes, brumes globales, blooms nutritifs ou pluies toxiques. Ces événements restent légers et observables, sans devenir un vrai moteur géologique complet.
 
 
 ## Écran d’accueil / setup planète
@@ -12,6 +12,7 @@ Le viewer démarre maintenant sur un écran de préparation avant de lancer la s
 À ce stade, la planète est déjà générée et visible à gauche, mais le temps ne tourne pas encore. Le panneau de droite affiche seulement les contrôles essentiels :
 
 ```text
+- nom modifiable du monde / de la planète
 - bouton Window / Fullscreen
 - bouton View: 2D/3D
 - seed utilisée
@@ -26,13 +27,13 @@ Les boutons `+` / `-` modifient immédiatement la planète prévisualisée. Chaq
 Le setup contient aussi un save/load simple :
 
 ```text
-Save preset   sauvegarde la seed + les paramètres de planète dans saves/world_presets/
-Load preset   ouvre une modale listant les derniers presets sauvegardés
+Save preset   sauvegarde nom + seed + paramètres + miniature du monde initial dans saves/world_presets/
+Load preset   ouvre une modale avec miniatures pour restaurer les derniers presets
 ```
 
 Ce n'est pas encore un vrai save-game : les espèces, populations, événements et l'état RNG de la simulation en cours ne sont pas sauvegardés. C'est volontaire pour éviter de figer trop tôt un format de sauvegarde alors que les phases changent encore le modèle.
 
-Pendant la simulation, un bouton `Save preset` est aussi disponible dans le panneau principal. Il sauvegarde le même preset reproductible de planète que l’écran setup : seed + paramètres de génération uniquement. Il ne sauvegarde pas encore le tick, les espèces ou les populations.
+Pendant la simulation, un bouton `Save preset` est aussi disponible dans le panneau principal. Il sauvegarde le même preset reproductible de planète que l’écran setup : nom + seed + paramètres + miniature initiale uniquement. Il ne sauvegarde pas encore le tick, les espèces ou les populations.
 
 Paramètres modifiables dans le setup :
 
@@ -65,6 +66,22 @@ g             bascule rendu carte 2D / planète 3D
 s             screenshot
 q/esc         quitter
 ```
+
+## Phase 8 — planetary history events
+
+Phase 8 commence le travail sur les grands événements planétaires sans encore ajouter de vraie tectonique ou de moteur géologique profond. Les événements sont rares, globaux, déterministes à seed identique, et apparaissent dans le log comme événements `climate` :
+
+```text
+cold snap
+warm period
+global haze
+nutrient bloom
+toxic rains
+```
+
+Ils peuvent modifier temporairement la température globale, la lumière reçue, les nutriments ou la toxicité. Une nouvelle couche `climate_stress` permet de visualiser la pression climatique active.
+
+Le nom du monde est généré automatiquement depuis la seed, mais peut être édité en haut du panneau avant ou pendant la simulation. Les presets sauvegardent ce nom et affichent une miniature du monde de départ dans la modale de chargement.
 
 ## Installation / lancement rapide
 

@@ -1,4 +1,4 @@
-"""Phase 7 prototype for morphology and body-plan tradeoffs."""
+"""Phase 8 prototype with planetary history events and morphology/body plans."""
 
 from .config import PlanetConfig
 from .life import LifeSpecies, LifeTraits

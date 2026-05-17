@@ -89,6 +89,7 @@ class Planet:
     migration_pressure: np.ndarray
     isolation_pressure: np.ndarray
     morphology_index: np.ndarray
+    climate_stress: np.ndarray
     populations: np.ndarray
     biomass: np.ndarray
     diversity: np.ndarray
@@ -98,6 +99,10 @@ class Planet:
     extinction_count: int = 0
     tick: int = 0
     event_log: list[SimulationEvent] = field(default_factory=list)
+    climate_temperature_offset_c: float = 0.0
+    climate_light_multiplier: float = 1.0
+    planetary_event_ticks_remaining: int = 0
+    planetary_event_label: str = "stable climate"
 
     @classmethod
     def generate(cls, config: PlanetConfig) -> "Planet":
@@ -137,6 +142,7 @@ class Planet:
         migration_pressure = np.zeros_like(fertility, dtype=np.float32)
         isolation_pressure = np.zeros_like(fertility, dtype=np.float32)
         morphology_index = np.zeros_like(fertility, dtype=np.float32)
+        climate_stress = np.zeros_like(fertility, dtype=np.float32)
         populations = np.zeros((config.max_species, config.height, config.width), dtype=np.float32)
         biomass = np.zeros_like(fertility, dtype=np.float32)
         diversity = np.zeros_like(fertility, dtype=np.float32)
@@ -167,6 +173,7 @@ class Planet:
             migration_pressure=migration_pressure,
             isolation_pressure=isolation_pressure,
             morphology_index=morphology_index,
+            climate_stress=climate_stress,
             populations=populations,
             biomass=biomass,
             diversity=diversity,
@@ -373,6 +380,7 @@ class Planet:
             return
 
         self.tick += steps
+        self._update_planetary_events(steps)
         self._update_seasonal_climate()
         self._update_volcanism(steps)
         self._update_resources(steps)
@@ -386,6 +394,72 @@ class Planet:
         """Return a new planet with a new or explicit seed."""
         new_seed = self.config.seed + 1 if seed is None else seed
         return Planet.generate(replace(self.config, seed=new_seed))
+
+    def _update_planetary_events(self, steps: int) -> None:
+        """Occasional Phase 8 planetary history events.
+
+        These are deliberately coarse global events: cold snaps, warm periods,
+        dimming hazes, nutrient blooms and acidic/toxic rains. They create
+        historical pressure without introducing a full geology/climate engine.
+        """
+        steps = max(1, int(steps))
+        decay = _decay_factor(self.config.planetary_event_decay_rate, steps)
+
+        if self.planetary_event_ticks_remaining > 0:
+            self.planetary_event_ticks_remaining = max(0, self.planetary_event_ticks_remaining - steps)
+            if self.planetary_event_ticks_remaining == 0:
+                self.planetary_event_label = "recovery"
+            return
+
+        self.climate_temperature_offset_c *= decay
+        self.climate_light_multiplier = 1.0 + (float(self.climate_light_multiplier) - 1.0) * decay
+        if abs(self.climate_temperature_offset_c) < 0.05:
+            self.climate_temperature_offset_c = 0.0
+        if abs(self.climate_light_multiplier - 1.0) < 0.005:
+            self.climate_light_multiplier = 1.0
+            self.planetary_event_label = "stable climate"
+
+        expected = self.config.planetary_event_rate * steps
+        event_count = int(self.rng.poisson(expected))
+        if event_count <= 0:
+            return
+
+        period = max(10, int(self.config.seasonal_period_ticks))
+        min_duration = max(60, int(period * self.config.planetary_event_min_duration_fraction))
+        max_duration = max(min_duration + 1, int(period * self.config.planetary_event_max_duration_fraction))
+        duration = int(self.rng.integers(min_duration, max_duration + 1))
+        kind = str(self.rng.choice(["cold_snap", "warm_period", "global_haze", "nutrient_bloom", "toxic_rain"]))
+        self.planetary_event_ticks_remaining = duration
+
+        if kind == "cold_snap":
+            offset = -float(self.rng.uniform(0.45, 1.0) * self.config.planetary_event_temperature_max_c)
+            self.climate_temperature_offset_c = offset
+            self.climate_light_multiplier = min(self.climate_light_multiplier, float(self.rng.uniform(0.82, 0.94)))
+            self.planetary_event_label = "cold snap"
+            self._log_event("climate", f"cold snap begins for {duration} ticks")
+        elif kind == "warm_period":
+            offset = float(self.rng.uniform(0.35, 0.85) * self.config.planetary_event_temperature_max_c)
+            self.climate_temperature_offset_c = offset
+            self.climate_light_multiplier = max(self.climate_light_multiplier, float(self.rng.uniform(1.02, 1.10)))
+            self.planetary_event_label = "warm period"
+            self._log_event("climate", f"warm period begins for {duration} ticks")
+        elif kind == "global_haze":
+            self.climate_temperature_offset_c = min(self.climate_temperature_offset_c, -float(self.rng.uniform(1.5, 4.0)))
+            self.climate_light_multiplier = float(self.rng.uniform(self.config.planetary_event_light_min_multiplier, 0.86))
+            self.planetary_event_label = "global haze"
+            self._log_event("climate", f"global haze dims the world for {duration} ticks")
+        elif kind == "nutrient_bloom":
+            bloom = self.config.planetary_event_nutrient_bloom_strength * (0.35 + 0.65 * self.water + 0.45 * self.humidity)
+            self.nutrients = np.clip(self.nutrients + bloom.astype(np.float32), 0.0, 1.0).astype(np.float32)
+            self.planetary_event_label = "nutrient bloom"
+            self._log_event("climate", f"planetary nutrient bloom for {duration} ticks")
+        else:
+            acid = self.config.planetary_event_toxicity_strength * (0.25 + 0.75 * self.humidity + 0.30 * self.volcanism)
+            self.toxicity = np.clip(self.toxicity + acid.astype(np.float32), 0.0, 1.0).astype(np.float32)
+            self.climate_light_multiplier = min(self.climate_light_multiplier, 0.92)
+            self.planetary_event_label = "toxic rains"
+            self._log_event("climate", f"toxic rains stress the biosphere for {duration} ticks")
+
 
     def _update_seasonal_climate(self) -> None:
         period = max(10, self.config.seasonal_period_ticks)
@@ -406,10 +480,19 @@ class Planet:
             * hemisphere_signal
             * ocean_damping
         )
-        self.temperature_c = (self.base_temperature_c + seasonal_temp).astype(np.float32)
+        self.temperature_c = (self.base_temperature_c + seasonal_temp + float(self.climate_temperature_offset_c)).astype(np.float32)
 
-        light_multiplier = 1.0 + self.config.seasonal_light_swing * hemisphere_signal
+        light_multiplier = (1.0 + self.config.seasonal_light_swing * hemisphere_signal) * float(self.climate_light_multiplier)
         self.light = np.clip(self.base_light * light_multiplier, 0.03, 1.0).astype(np.float32)
+
+        temp_stress = min(1.0, abs(float(self.climate_temperature_offset_c)) / max(1.0, self.config.planetary_event_temperature_max_c))
+        light_stress = min(1.0, abs(1.0 - float(self.climate_light_multiplier)) / 0.35)
+        base_stress = max(temp_stress, light_stress)
+        if base_stress > 0.0:
+            lat_weight = np.clip(0.35 + 0.65 * np.abs(lat_full), 0.0, 1.0)
+            self.climate_stress = np.clip(base_stress * (0.55 + 0.45 * lat_weight), 0.0, 1.0).astype(np.float32)
+        else:
+            self.climate_stress *= _decay_factor(self.config.planetary_event_decay_rate, 1)
 
     def _update_volcanism(self, steps: int) -> None:
         self.volcanic_pulses *= _decay_factor(self.config.volcanic_pulse_decay_rate, steps)

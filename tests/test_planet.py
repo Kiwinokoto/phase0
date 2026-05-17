@@ -5,7 +5,7 @@ import pygame
 
 from alife import Planet, PlanetConfig
 from alife.planet import SimulationEvent
-from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, list_world_presets, load_world_preset, planet_config_from_preset, planet_config_to_preset, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, save_world_preset, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay, specimen_keywords
+from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, list_world_presets, load_world_preset, planet_config_from_preset, planet_config_to_preset, decode_world_thumbnail, random_world_name, read_world_preset_metadata, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, save_world_preset, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay, specimen_keywords
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -28,6 +28,7 @@ NORMALIZED_FIELD_NAMES = [
     "migration_pressure",
     "isolation_pressure",
     "morphology_index",
+    "climate_stress",
     "biomass",
     "diversity",
 ]
@@ -45,6 +46,7 @@ DYNAMIC_FIELD_NAMES = [
     "migration_pressure",
     "isolation_pressure",
     "morphology_index",
+    "climate_stress",
     "biomass",
     "diversity",
 ]
@@ -1327,3 +1329,67 @@ def test_load_preset_modal_click_restores_planet_config(tmp_path):
     assert viewer.selected_species_id is None
     assert viewer.load_preset_modal_open is False
     assert "Loaded" in viewer.setup_status_message
+
+
+
+def test_world_name_is_seeded_editable_and_saved_with_thumbnail(tmp_path):
+    config = PlanetConfig(width=48, height=24, seed=8081)
+    name = random_world_name(config.seed)
+    assert name == random_world_name(config.seed)
+    assert name
+
+    path = save_world_preset(config, directory=tmp_path, world_name="Gaia Test")
+    loaded_config, loaded_name, data = read_world_preset_metadata(path)
+
+    assert loaded_config.seed == config.seed
+    assert loaded_name == "Gaia Test"
+    assert "thumbnail" in data
+    thumb = decode_world_thumbnail(data["thumbnail"])
+    assert thumb is not None
+    assert thumb.shape == (36, 72, 3)
+    assert thumb.dtype == np.uint8
+    assert float(thumb.std()) > 0.0
+
+
+def test_viewer_world_name_editing_without_opening_window():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=8182))
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.world_name = "Old"
+    viewer.world_name_edit_active = True
+
+    viewer._handle_world_name_key(pygame.K_BACKSPACE, "")
+    viewer._handle_world_name_key(pygame.K_UNKNOWN, "X")
+    viewer._handle_world_name_key(pygame.K_RETURN, "")
+
+    assert viewer.world_name == "OlX"
+    assert viewer.world_name_edit_active is False
+
+
+def test_phase8_planetary_events_create_climate_stress_and_logs():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=8283,
+        planetary_event_rate=1.0,
+        planetary_event_min_duration_fraction=0.05,
+        planetary_event_max_duration_fraction=0.06,
+    )
+    planet = Planet.generate(config)
+    planet.step(20)
+
+    assert planet.planetary_event_label != "stable climate"
+    assert planet.planetary_event_ticks_remaining > 0
+    assert any(event.kind == "climate" for event in planet.event_log)
+    assert float(planet.climate_stress.max()) >= 0.0
+    rgb = render_layer(planet, "climate_stress")
+    assert rgb.shape == (32, 64, 3)
+    assert rgb.dtype == np.uint8
+
+
+def test_phase8_source_markers_are_visible_to_observer():
+    source = inspect.getsource(PlanetViewer._draw_panel) + inspect.getsource(PlanetViewer._draw_world_name_header) + inspect.getsource(PlanetViewer._draw_load_preset_modal)
+
+    assert "Phase 8" in source
+    assert "World name" in source
+    assert "thumbnail" in source

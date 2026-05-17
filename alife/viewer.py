@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import secrets
+import zlib
 from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,45 @@ WORLD_PRESET_KIND = "alife-world-preset"
 WORLD_PRESET_SCHEMA_VERSION = 1
 DEFAULT_PRESET_DIR = Path("saves/world_presets")
 CONFIG_PRESET_KEYS: tuple[str, ...] = tuple(field.name for field in fields(PlanetConfig))
+WORLD_NAME_MAX_CHARS = 32
+WORLD_NAME_PREFIXES = (
+    "Astra", "Numa", "Vel", "Oria", "Kora", "Ilios", "Mira", "Sava",
+    "Eos", "Rana", "Tala", "Vire", "Nexo", "Ophi", "Luma", "Aru",
+)
+WORLD_NAME_SUFFIXES = (
+    "mar", "dara", "vein", "sol", "terra", "nys", "ara", "prime",
+    "fall", "reach", "mere", "aqua", "haven", "drift", "mora", "rise",
+)
+
+
+def random_world_name(seed: int) -> str:
+    """Generate a deterministic editable planet/world name from the seed."""
+    rng = np.random.default_rng(int(seed) ^ 0xA11F_E770)
+    prefix = WORLD_NAME_PREFIXES[int(rng.integers(0, len(WORLD_NAME_PREFIXES)))]
+    suffix = WORLD_NAME_SUFFIXES[int(rng.integers(0, len(WORLD_NAME_SUFFIXES)))]
+    numeral = int(rng.integers(1, 100))
+    return f"{prefix}-{suffix} {numeral:02d}"
+
+
+def sanitize_world_name(value: object, *, fallback_seed: int = 0) -> str:
+    raw = str(value or "").strip()
+    cleaned = " ".join(raw.replace("\n", " ").replace("\r", " ").split())
+    if not cleaned:
+        cleaned = random_world_name(fallback_seed)
+    return cleaned[:WORLD_NAME_MAX_CHARS]
+
+
+def world_name_from_preset_data(data: dict[str, object], *, fallback_seed: int = 0) -> str:
+    return sanitize_world_name(data.get("world_name"), fallback_seed=fallback_seed)
+
+
+def read_world_preset_metadata(path: Path) -> tuple[PlanetConfig, str, dict[str, object]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("World preset root must be a JSON object.")
+    config = planet_config_from_preset(data)
+    name = world_name_from_preset_data(data, fallback_seed=config.seed)
+    return config, name, data
 
 
 @dataclass(frozen=True)
@@ -64,20 +105,30 @@ DETAIL_SETUP_FIELDS: tuple[SetupField, ...] = (
 PLANET_SETUP_FIELDS: tuple[SetupField, ...] = PRIMARY_SETUP_FIELDS + DETAIL_SETUP_FIELDS
 
 
-def planet_config_to_preset(config: PlanetConfig) -> dict[str, object]:
+def planet_config_to_preset(config: PlanetConfig, world_name: str | None = None) -> dict[str, object]:
     """Serialize only the reproducible planet setup, not the live simulation.
 
     This intentionally avoids storing populations, event logs or RNG state until
     the model is more stable. It is a light "world preset" format, not a full
-    save-game format.
+    save-game format. Phase 7.1 adds an editable world name and a tiny preview
+    thumbnail, but still does not store live species/history.
     """
-    return {
+    name = sanitize_world_name(world_name, fallback_seed=config.seed)
+    preset = {
         "kind": WORLD_PRESET_KIND,
         "schema_version": WORLD_PRESET_SCHEMA_VERSION,
         "phase": "phase7",
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "world_name": name,
         "config": {key: getattr(config, key) for key in CONFIG_PRESET_KEYS},
     }
+    try:
+        preset["thumbnail"] = encode_world_thumbnail(config)
+    except Exception:
+        # A save should never fail only because the observer thumbnail could not
+        # be rendered. The preset remains loadable from seed + config.
+        pass
+    return preset
 
 
 def planet_config_from_preset(data: dict[str, object]) -> PlanetConfig:
@@ -92,25 +143,26 @@ def planet_config_from_preset(data: dict[str, object]) -> PlanetConfig:
     return config
 
 
-def save_world_preset(config: PlanetConfig, directory: Path | None = None) -> Path:
+def save_world_preset(config: PlanetConfig, directory: Path | None = None, world_name: str | None = None) -> Path:
     directory = DEFAULT_PRESET_DIR if directory is None else directory
     directory.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"world_seed{int(config.seed)}_{timestamp}.json"
+    name = sanitize_world_name(world_name, fallback_seed=config.seed)
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-") or "world"
+    slug = slug[:28].strip("-") or "world"
+    base_name = f"{slug}_seed{int(config.seed)}_{timestamp}.json"
     path = directory / base_name
     suffix = 1
     while path.exists():
-        path = directory / f"world_seed{int(config.seed)}_{timestamp}_{suffix}.json"
+        path = directory / f"{slug}_seed{int(config.seed)}_{timestamp}_{suffix}.json"
         suffix += 1
-    path.write_text(json.dumps(planet_config_to_preset(config), indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(planet_config_to_preset(config, name), indent=2, sort_keys=True), encoding="utf-8")
     return path
 
 
 def load_world_preset(path: Path) -> PlanetConfig:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("World preset root must be a JSON object.")
-    return planet_config_from_preset(data)
+    config, _name, _data = read_world_preset_metadata(path)
+    return config
 
 
 def list_world_presets(directory: Path | None = None, *, limit: int = 12) -> list[Path]:
@@ -120,6 +172,39 @@ def list_world_presets(directory: Path | None = None, *, limit: int = 12) -> lis
     paths = [path for path in directory.glob("*.json") if path.is_file()]
     paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return paths[: max(0, int(limit))]
+
+
+def encode_world_thumbnail(config: PlanetConfig, *, thumb_w: int = 72, thumb_h: int = 36) -> dict[str, object]:
+    """Render a small deterministic initial-world preview into a JSON blob."""
+    preview = Planet.generate(config)
+    rgb = render_layer(preview, "biome", overlay_mode="off", weather_overlay_mode="off")
+    src_h, src_w = rgb.shape[:2]
+    xs = np.clip(np.linspace(0, src_w - 1, thumb_w).astype(int), 0, src_w - 1)
+    ys = np.clip(np.linspace(0, src_h - 1, thumb_h).astype(int), 0, src_h - 1)
+    small = np.ascontiguousarray(rgb[ys][:, xs].astype(np.uint8))
+    compressed = zlib.compress(small.tobytes(), level=6)
+    return {
+        "width": int(thumb_w),
+        "height": int(thumb_h),
+        "encoding": "zlib-rgb24-base64",
+        "data": base64.b64encode(compressed).decode("ascii"),
+    }
+
+
+def decode_world_thumbnail(data: dict[str, object]) -> np.ndarray | None:
+    try:
+        if data.get("encoding") != "zlib-rgb24-base64":
+            return None
+        width = int(data.get("width", 0))
+        height = int(data.get("height", 0))
+        payload = str(data.get("data", ""))
+        if width <= 0 or height <= 0 or not payload:
+            return None
+        raw = zlib.decompress(base64.b64decode(payload.encode("ascii")))
+        rgb = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+        return rgb.copy()
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -310,6 +395,12 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
         colors=((10, 12, 18), (76, 120, 150), (230, 204, 125)),
         labels=("simple", "formed", "complex"),
     ),
+    "climate_stress": LayerLegend(
+        title="Climate stress",
+        description=("Phase 8 planetary history pressure.", "Bright = climate shock/drift."),
+        colors=((10, 12, 20), (70, 88, 150), (245, 215, 95)),
+        labels=("stable", "stressed", "shock"),
+    ),
 }
 
 
@@ -339,11 +430,15 @@ class PlanetViewer:
         "migration_pressure",
         "isolation_pressure",
         "body_plan",
+        "climate_stress",
     )
 
     def __init__(self, planet: Planet, scale: int = 4, start_fullscreen: bool = True) -> None:
         pygame.init()
         self.planet = planet
+        self.world_name = random_world_name(planet.config.seed)
+        self.world_name_edit_active = False
+        self.world_name_rect = pygame.Rect(0, 0, 0, 0)
         self.scale = max(1, int(scale))
         self.layer_index = 0
         self.paused = False
@@ -379,6 +474,7 @@ class PlanetViewer:
         self.event_log_row_rects: list[tuple[pygame.Rect, int, tuple[int, int] | None]] = []
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
         self.runtime_save_preset_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.world_name_rect = pygame.Rect(0, 0, 0, 0)
         self.runtime_status_message = ""
         self.life_tree_modal_open = False
         self.life_tree_modal_rect = pygame.Rect(0, 0, 0, 0)
@@ -421,7 +517,7 @@ class PlanetViewer:
             self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
-        pygame.display.set_caption("Artificial Life Sandbox — Phase 7")
+        pygame.display.set_caption("Artificial Life Sandbox — Phase 8")
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
@@ -451,7 +547,7 @@ class PlanetViewer:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
-                    running = self._handle_key(event.key)
+                    running = self._handle_key(event.key, getattr(event, "unicode", ""))
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self._handle_mouse_click(event.pos)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -502,6 +598,11 @@ class PlanetViewer:
         if self.genealogy_modal_species_id is not None:
             self._handle_genealogy_modal_click(pos)
             return
+
+        if self.world_name_rect.collidepoint(pos):
+            self.world_name_edit_active = True
+            return
+        self.world_name_edit_active = False
 
         if self.fullscreen_button_rect.collidepoint(pos):
             self._toggle_fullscreen()
@@ -648,18 +749,20 @@ class PlanetViewer:
         for rect, path in self.load_preset_row_rects:
             if rect.collidepoint(pos):
                 try:
-                    config = load_world_preset(path)
+                    config, world_name, _data = read_world_preset_metadata(path)
                 except Exception as exc:
                     self.setup_status_message = f"Load failed: {exc}"
                     self.load_preset_modal_open = False
                     return
                 self.planet = Planet.generate(config)
+                self.world_name = world_name
+                self.world_name_edit_active = False
                 self.speed = self.planet.config.initial_speed
                 self.in_setup_screen = True
                 self.intro_active = False
                 self.selected_cell = None
                 self.selected_species_id = None
-                self.setup_status_message = f"Loaded {path.name}"
+                self.setup_status_message = f"Loaded {world_name}"
                 self.load_preset_modal_open = False
                 self._update_layout()
                 self._invalidate_cache()
@@ -668,7 +771,10 @@ class PlanetViewer:
         if not self.load_preset_modal_rect.collidepoint(pos):
             self.load_preset_modal_open = False
 
-    def _handle_key(self, key: int) -> bool:
+    def _handle_key(self, key: int, text: str = "") -> bool:
+        if self.world_name_edit_active:
+            return self._handle_world_name_key(key, text)
+
         if self.load_preset_modal_open and key == pygame.K_ESCAPE:
             self.load_preset_modal_open = False
             return True
@@ -725,7 +831,9 @@ class PlanetViewer:
             self._update_layout()
             self._invalidate_cache()
         elif key == pygame.K_r:
-            self.planet = self.planet.regenerate(seed=random_seed())
+            seed = random_seed()
+            self.planet = self.planet.regenerate(seed=seed)
+            self.world_name = random_world_name(seed)
             self.selected_cell = None
             self.selected_species_id = None
             self._invalidate_cache()
@@ -878,6 +986,7 @@ class PlanetViewer:
         self.event_log_row_rects = []
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
         self.runtime_save_preset_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.world_name_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_row_rects = []
         self.load_preset_modal_close_rect = pygame.Rect(0, 0, 0, 0)
@@ -898,7 +1007,9 @@ class PlanetViewer:
             self._draw_setup_panel(x, y, content_w)
             return
 
-        self._draw_text("Phase 7 — Morphology & Body Plans", x, y, self.font, (235, 238, 245))
+        y = self._draw_world_name_header(x, y, content_w)
+        y += 6
+        self._draw_text("Phase 8 — Planetary History", x, y, self.font, (235, 238, 245))
         y += 25
 
         y = self._draw_active_layer_header(x, y)
@@ -967,11 +1078,51 @@ class PlanetViewer:
             self._draw_current_layer_legend(x, legend_y, content_w)
 
 
+    def _draw_world_name_header(self, x: int, y: int, width: int) -> int:
+        """Editable planet/world name shown at the top of the observer deck."""
+        label = "World name"
+        self._draw_text(label, x, y, self.tiny_font, (145, 154, 178))
+        y += 14
+        rect = pygame.Rect(x, y, width, 30)
+        self.world_name_rect = rect
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        fill = (34, 42, 58) if not self.world_name_edit_active else (40, 50, 72)
+        border = (105, 140, 190) if self.world_name_edit_active else ((72, 88, 118) if hovered else (56, 66, 90))
+        pygame.draw.rect(self.screen, fill, rect, border_radius=8)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=8)
+        text = sanitize_world_name(self.world_name, fallback_seed=self.planet.config.seed)
+        cursor = "_" if self.world_name_edit_active and (pygame.time.get_ticks() // 420) % 2 == 0 else ""
+        self._draw_text(self._clip_text(text + cursor, max(10, (width - 24) // 8)), x + 12, y + 6, self.layer_font, (238, 243, 252))
+        hint = "click to rename" if not self.world_name_edit_active else "typing… enter/esc to finish"
+        hint_surface = self.tiny_font.render(hint, True, (138, 150, 174))
+        self.screen.blit(hint_surface, (rect.right - hint_surface.get_width() - 10, y + 17))
+        return y + 36
+
+    def _handle_world_name_key(self, key: int, text: str = "") -> bool:
+        if key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.world_name = sanitize_world_name(self.world_name, fallback_seed=self.planet.config.seed)
+            self.world_name_edit_active = False
+            return True
+        if key == pygame.K_BACKSPACE:
+            self.world_name = self.world_name[:-1]
+            return True
+        if key == pygame.K_DELETE:
+            self.world_name = ""
+            return True
+        if text and text.isprintable() and text not in {"\r", "\n", "\t"}:
+            if len(self.world_name) < WORLD_NAME_MAX_CHARS:
+                self.world_name = sanitize_world_name(self.world_name + text, fallback_seed=self.planet.config.seed)
+            return True
+        return True
+
+
     def _draw_setup_panel(self, x: int, y: int, width: int) -> None:
         if self.intro_active:
             self._draw_intro_panel(x, y, width)
             return
 
+        y = self._draw_world_name_header(x, y, width)
+        y += 4
         self._draw_text("Artificial Life Sandbox", x, y, self.font, (235, 238, 245))
         y += 24
         self._draw_text("Planet setup — preview before simulation", x, y, self.tiny_font, (165, 174, 196))
@@ -1006,6 +1157,8 @@ class PlanetViewer:
                 ("bio ocean", self._ocean_biomass_share_label()),
                 ("migr", f"{self.planet.migration_pressure.mean():.3f}"),
                 ("isolate", f"{self.planet.isolation_pressure.mean():.3f}"),
+                ("climate", self.planet.planetary_event_label),
+                ("stress", f"{self.planet.climate_stress.mean():.3f}"),
             ),
             x,
             y,
@@ -1225,7 +1378,7 @@ class PlanetViewer:
     def _save_current_preset(self, *, status_target: str) -> None:
         """Save only the reproducible planet preset, not live simulation state."""
         try:
-            path = save_world_preset(self.planet.config)
+            path = save_world_preset(self.planet.config, world_name=getattr(self, "world_name", None))
             message = f"Saved preset: {path.name}"
         except Exception as exc:
             message = f"Save failed: {exc}"
@@ -1266,7 +1419,10 @@ class PlanetViewer:
         self._invalidate_cache()
 
     def _randomize_setup_seed(self) -> None:
-        self._set_setup_config(seed=random_seed())
+        seed = random_seed()
+        self.world_name = random_world_name(seed)
+        self.world_name_edit_active = False
+        self._set_setup_config(seed=seed)
 
     def _adjust_setup_field(self, field_key: str, direction: int) -> None:
         field = next((item for item in PLANET_SETUP_FIELDS if item.key == field_key), None)
@@ -1390,6 +1546,8 @@ class PlanetViewer:
                 ("view", self.projection_mode),
                 ("life", self.life_overlay_mode),
                 ("weather", self.weather_overlay_mode),
+                ("climate", self.planet.planetary_event_label),
+                ("event left", str(self.planet.planetary_event_ticks_remaining)),
             ),
             x,
             y,
@@ -1443,6 +1601,8 @@ class PlanetViewer:
             return EXTINCT_CRIMSON
         if kind == "volcanism":
             return (238, 174, 92)
+        if kind == "climate":
+            return (155, 198, 255)
         return (202, 210, 230)
 
 
@@ -1494,6 +1654,8 @@ class PlanetViewer:
                 ("bio ocean", self._ocean_biomass_share_label()),
                 ("migr", f"{self.planet.migration_pressure.mean():.3f}"),
                 ("isolate", f"{self.planet.isolation_pressure.mean():.3f}"),
+                ("climate", self.planet.planetary_event_label),
+                ("stress", f"{self.planet.climate_stress.mean():.3f}"),
             ),
             x,
             y,
@@ -1727,16 +1889,16 @@ class PlanetViewer:
         return y + row_h
 
     def _draw_load_preset_modal(self) -> None:
-        presets = list_world_presets(limit=12)
+        presets = list_world_presets(limit=10)
         screen_w, screen_h = self.screen.get_size()
         overlay = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
         overlay.fill((3, 5, 10, 168))
         self.screen.blit(overlay, (0, 0))
 
-        modal_w = min(760, screen_w - 90)
-        modal_h = min(560, screen_h - 86)
-        modal_w = max(520, modal_w)
-        modal_h = max(360, modal_h)
+        modal_w = min(900, screen_w - 90)
+        modal_h = min(650, screen_h - 86)
+        modal_w = max(620, modal_w)
+        modal_h = max(430, modal_h)
         modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
         self.load_preset_modal_rect = modal
         self.load_preset_row_rects = []
@@ -1755,7 +1917,7 @@ class PlanetViewer:
         self._draw_text("Load planet preset", x, y, self.font, (238, 243, 252))
         y += 24
         self._draw_text(
-            "Simple save/load stores only seed + setup parameters, not live species or history.",
+            "Presets store name + seed/settings + starting-world thumbnail; live species/history are not saved yet.",
             x,
             y,
             self.tiny_font,
@@ -1764,46 +1926,64 @@ class PlanetViewer:
         y += 24
 
         if not presets:
-            self._draw_text("No saved presets yet. Use Save preset on the setup screen first.", x, y, self.tiny_font, (180, 188, 206))
+            self._draw_text("No saved presets yet. Use Save preset on the setup or runtime panel first.", x, y, self.tiny_font, (180, 188, 206))
             return
 
         header_rect = pygame.Rect(x, y, width, 20)
         pygame.draw.rect(self.screen, (28, 34, 48), header_rect, border_radius=5)
-        self._draw_text("file", x + 8, y + 3, self.tiny_font, (170, 182, 205))
-        self._draw_text("seed", x + int(width * 0.45), y + 3, self.tiny_font, (170, 182, 205))
-        self._draw_text("land/ocean", x + int(width * 0.58), y + 3, self.tiny_font, (170, 182, 205))
-        self._draw_text("year", x + int(width * 0.76), y + 3, self.tiny_font, (170, 182, 205))
-        y += 24
+        self._draw_text("preview", x + 8, y + 3, self.tiny_font, (170, 182, 205))
+        self._draw_text("world", x + 112, y + 3, self.tiny_font, (170, 182, 205))
+        self._draw_text("seed", x + int(width * 0.58), y + 3, self.tiny_font, (170, 182, 205))
+        self._draw_text("sea/year", x + int(width * 0.73), y + 3, self.tiny_font, (170, 182, 205))
+        y += 26
 
         row_bottom = modal.bottom - 32
-        visible_rows = max(1, (row_bottom - y) // 24)
+        row_h = 58
+        visible_rows = max(1, (row_bottom - y) // row_h)
         for path in presets[:visible_rows]:
             try:
-                config = load_world_preset(path)
-                land = f"sea {config.sea_level:.2f}"
-                year = "auto" if int(config.seasonal_period_ticks) == 0 else str(config.seasonal_period_ticks)
+                config, world_name, data = read_world_preset_metadata(path)
                 seed_text = str(config.seed)
+                year = "auto" if int(config.seasonal_period_ticks) == 0 else str(config.seasonal_period_ticks)
+                sea_year = f"sea {config.sea_level:.2f} / {year}"
+                thumbnail = None
+                thumb_data = data.get("thumbnail")
+                if isinstance(thumb_data, dict):
+                    thumbnail = decode_world_thumbnail(thumb_data)
+                if thumbnail is None:
+                    thumbnail = decode_world_thumbnail(encode_world_thumbnail(config, thumb_w=72, thumb_h=36))
             except Exception:
                 config = None
-                land = "invalid"
-                year = "—"
+                world_name = path.stem
                 seed_text = "—"
+                sea_year = "invalid"
+                thumbnail = None
 
-            row_rect = pygame.Rect(x, y, width, 21)
+            row_rect = pygame.Rect(x, y, width, row_h - 6)
             hovered = row_rect.collidepoint(pygame.mouse.get_pos())
             fill = (35, 43, 58) if hovered else (22, 27, 38)
-            pygame.draw.rect(self.screen, fill, row_rect, border_radius=5)
-            pygame.draw.rect(self.screen, (60, 70, 95), row_rect, 1, border_radius=5)
+            pygame.draw.rect(self.screen, fill, row_rect, border_radius=6)
+            pygame.draw.rect(self.screen, (60, 70, 95), row_rect, 1, border_radius=6)
             if config is not None:
                 self.load_preset_row_rects.append((row_rect, path))
-                color = (220, 228, 244)
+                color = (230, 238, 248)
             else:
                 color = (205, 80, 92)
-            self._draw_text(self._clip_text(path.name, max(12, int(width * 0.43) // 7)), x + 8, y + 4, self.tiny_font, color)
-            self._draw_text(seed_text, x + int(width * 0.45), y + 4, self.tiny_font, (210, 218, 236))
-            self._draw_text(land, x + int(width * 0.58), y + 4, self.tiny_font, (210, 218, 236))
-            self._draw_text(year, x + int(width * 0.76), y + 4, self.tiny_font, (210, 218, 236))
-            y += 24
+
+            thumb_rect = pygame.Rect(x + 8, y + 8, 86, 36)
+            pygame.draw.rect(self.screen, (8, 10, 14), thumb_rect, border_radius=4)
+            pygame.draw.rect(self.screen, (60, 70, 95), thumb_rect, 1, border_radius=4)
+            if thumbnail is not None:
+                surface = pygame.surfarray.make_surface(np.transpose(thumbnail, (1, 0, 2)))
+                surface = pygame.transform.scale(surface, thumb_rect.size)
+                self.screen.blit(surface, thumb_rect.topleft)
+                pygame.draw.rect(self.screen, (80, 96, 128), thumb_rect, 1, border_radius=4)
+
+            self._draw_text(self._clip_text(world_name, max(16, int(width * 0.40) // 8)), x + 112, y + 8, self.small_font, color)
+            self._draw_text(self._clip_text(path.name, max(16, int(width * 0.40) // 8)), x + 112, y + 28, self.tiny_font, (140, 152, 176))
+            self._draw_text(seed_text, x + int(width * 0.58), y + 18, self.tiny_font, (210, 218, 236))
+            self._draw_text(sea_year, x + int(width * 0.73), y + 18, self.tiny_font, (210, 218, 236))
+            y += row_h
 
         remaining = len(presets) - visible_rows
         if remaining > 0:
@@ -3280,6 +3460,8 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
         return _render_isolation_pressure(planet)
     if layer == "body_plan":
         return _render_body_plan(planet)
+    if layer == "climate_stress":
+        return _three_color_gradient(planet.climate_stress, (10, 12, 20), (70, 88, 150), (245, 215, 95))
     raise ValueError(f"Unknown layer: {layer}")
 
 

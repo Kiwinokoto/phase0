@@ -7,8 +7,8 @@ from dataclasses import dataclass
 class PlanetConfig:
     """Configuration for a generated 2D planet.
 
-    Phase 7 keeps proto-life abstract while adding body-plan/morphology
-    tradeoffs. Lineages still remain population fields; morphology affects
+    Phase 8 keeps proto-life abstract while adding body-plan/morphology
+    tradeoffs plus occasional planetary history events. Lineages still remain population fields; morphology affects
     costs, vulnerability, movement and resource capture, not individual agents.
     """
 
@@ -58,6 +58,17 @@ class PlanetConfig:
     volcanic_pulse_radius: float = 4.0
     volcanic_pulse_strength: float = 0.55
 
+
+    # Phase 8 planetary history events. These are rare global shocks/drifts
+    # layered on top of seasons, still lightweight and seed-deterministic.
+    planetary_event_rate: float = 0.000020
+    planetary_event_min_duration_fraction: float = 0.18
+    planetary_event_max_duration_fraction: float = 0.55
+    planetary_event_decay_rate: float = 0.006
+    planetary_event_temperature_max_c: float = 9.0
+    planetary_event_light_min_multiplier: float = 0.70
+    planetary_event_nutrient_bloom_strength: float = 0.18
+    planetary_event_toxicity_strength: float = 0.12
 
     # Phase 7 proto-life. Populations are stored per lineage and per map cell;
     # these are still abstract population fields, not individual organisms.
@@ -147,5 +158,11 @@ class PlanetConfig:
             raise ValueError("active_migration_cost must be >= 0.")
         if self.size_metabolic_cost < 0.0 or self.armor_metabolic_cost < 0.0 or self.speed_metabolic_cost < 0.0:
             raise ValueError("Phase 7 morphology costs must be >= 0.")
+        if self.planetary_event_rate < 0.0:
+            raise ValueError("planetary_event_rate must be >= 0.")
+        if self.planetary_event_min_duration_fraction <= 0.0 or self.planetary_event_max_duration_fraction <= 0.0:
+            raise ValueError("planetary event duration fractions must be positive.")
+        if self.planetary_event_max_duration_fraction < self.planetary_event_min_duration_fraction:
+            raise ValueError("planetary_event_max_duration_fraction must be >= minimum.")
         if self.initial_speed < 1:
             raise ValueError("initial_speed must be >= 1.")
