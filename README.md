@@ -35,6 +35,8 @@ tab    couche suivante
 ↑/↓    vitesse de tick
 +/-    vitesse de tick aussi
 bouton Fullscreen/Window dans le panneau de droite
+bouton Life: off/biomass/dominant dans le panneau de droite
+o      cycle aussi le life overlay
 r      nouvelle planète, seed aléatoire
 s      capture d’écran
 q/esc  quitter
@@ -60,6 +62,19 @@ biomass          densité totale de proto-vie vivante
 diversity        coexistence locale de plusieurs lignées
 dominant_life    couleur de la lignée dominante + densité de biomasse
 ```
+
+## Life overlay
+
+Le viewer affiche maintenant un overlay de vie sur les couches non-vivantes, activé par défaut en mode `biomass`.
+
+```text
+Life: biomass   ajoute une lueur verte proportionnelle à la biomasse
+Life: dominant  colore la vie selon la lignée dominante locale
+Life: off       carte brute sans overlay
+```
+
+L'overlay ne remplace pas les couches `biomass`, `diversity` ou `dominant_life` : il sert seulement à voir la biosphère directement sur la carte jolie/abiotique. Le bouton est volontairement placé dans le panneau de droite pour devenir plus tard un vrai menu de réglages.
+
 
 ## Logique Phase 3
 
@@ -101,6 +116,7 @@ Les couches les plus importantes :
 ```text
 fertility       où la vie a le plus de chances d'apparaître
 biomass         où elle réussit actuellement
+biome + overlay voir la vie sur la carte principale
 dominant_life   quelle lignée domine localement
 diversity       où plusieurs lignées coexistent
 dead_matter     traces d'effondrement/recyclage

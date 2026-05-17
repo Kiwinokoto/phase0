@@ -11,7 +11,11 @@ from .config import PlanetConfig
 from .planet import Planet
 
 LayerName = str
+OverlayMode = str
 Color = tuple[int, int, int]
+
+LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life")
+LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,7 @@ class PlanetViewer:
         self.layer_index = 0
         self.paused = False
         self.fullscreen = False
+        self.life_overlay_mode: OverlayMode = "biomass"
         self.speed = planet.config.initial_speed
         self.font = pygame.font.SysFont("monospace", 16)
         self.small_font = pygame.font.SysFont("monospace", 12)
@@ -172,10 +177,12 @@ class PlanetViewer:
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.life_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
         self._update_layout()
 
         self.clock = pygame.time.Clock()
         self.cached_layer: LayerName | None = None
+        self.cached_overlay_mode: OverlayMode | None = None
         self.cached_surface: pygame.Surface | None = None
         self.cached_surface_size: tuple[int, int] | None = None
 
@@ -212,6 +219,8 @@ class PlanetViewer:
     def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
         if self.fullscreen_button_rect.collidepoint(pos):
             self._toggle_fullscreen()
+        elif self.life_overlay_button_rect.collidepoint(pos):
+            self._cycle_life_overlay()
 
     def _handle_key(self, key: int) -> bool:
         if key in (pygame.K_ESCAPE, pygame.K_q):
@@ -230,6 +239,8 @@ class PlanetViewer:
             self.speed = max(1, self.speed // 2)
         elif key in (pygame.K_f, pygame.K_F11):
             self._toggle_fullscreen()
+        elif key == pygame.K_o:
+            self._cycle_life_overlay()
         elif key == pygame.K_r:
             self.planet = self.planet.regenerate(seed=random_seed())
             self._invalidate_cache()
@@ -244,6 +255,11 @@ class PlanetViewer:
         else:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
         self._update_layout()
+        self._invalidate_cache()
+
+    def _cycle_life_overlay(self) -> None:
+        index = LIFE_OVERLAY_MODES.index(self.life_overlay_mode)
+        self.life_overlay_mode = LIFE_OVERLAY_MODES[(index + 1) % len(LIFE_OVERLAY_MODES)]
         self._invalidate_cache()
 
     def _update_layout(self) -> None:
@@ -266,6 +282,7 @@ class PlanetViewer:
 
     def _invalidate_cache(self) -> None:
         self.cached_layer = None
+        self.cached_overlay_mode = None
         self.cached_surface = None
         self.cached_surface_size = None
 
@@ -277,17 +294,19 @@ class PlanetViewer:
     def _get_map_surface(self) -> pygame.Surface:
         if (
             self.cached_layer == self.current_layer
+            and self.cached_overlay_mode == self.life_overlay_mode
             and self.cached_surface is not None
             and self.cached_surface_size == self.map_rect.size
         ):
             return self.cached_surface
 
-        rgb = render_layer(self.planet, self.current_layer)
+        rgb = render_layer(self.planet, self.current_layer, overlay_mode=self.life_overlay_mode)
         surface = pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
         if surface.get_size() != self.map_rect.size:
             surface = pygame.transform.scale(surface, self.map_rect.size)
 
         self.cached_layer = self.current_layer
+        self.cached_overlay_mode = self.life_overlay_mode
         self.cached_surface = surface
         self.cached_surface_size = self.map_rect.size
         return surface
@@ -311,6 +330,7 @@ class PlanetViewer:
             f"speed: x{self.speed}",
             f"status: {'paused' if self.paused else 'running'}",
             f"mode: {'fullscreen' if self.fullscreen else 'window'}",
+            f"overlay: {self.life_overlay_mode}",
             f"layer: {self.current_layer}",
         ):
             self._draw_text(line, x, y, self.small_font, (195, 202, 220))
@@ -321,6 +341,7 @@ class PlanetViewer:
         y += 16
         for line in (
             "space pause  |  button fullscreen",
+            "button/o life overlay",
             "tab/←/→ layer | ↑/↓ speed",
             "r new seed   |  s screenshot",
             "q/esc quit",
@@ -390,11 +411,18 @@ class PlanetViewer:
         return y
 
     def _draw_settings_row(self, x: int, y: int) -> int:
-        button_w = min(180, self.panel_rect.width - 36)
         button_h = 28
-        label = "Window mode" if self.fullscreen else "Fullscreen"
+        gap = 8
+        available_w = self.panel_rect.width - 36
+        button_w = max(126, min(168, (available_w - gap) // 2))
+
+        fullscreen_label = "Window" if self.fullscreen else "Fullscreen"
         self.fullscreen_button_rect = pygame.Rect(x, y, button_w, button_h)
-        self._draw_button(self.fullscreen_button_rect, label)
+        self._draw_button(self.fullscreen_button_rect, fullscreen_label)
+
+        overlay_label = f"Life: {self.life_overlay_mode}"
+        self.life_overlay_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
+        self._draw_button(self.life_overlay_button_rect, overlay_label)
         return y + button_h
 
     def _draw_button(self, rect: pygame.Rect, label: str) -> None:
@@ -421,6 +449,17 @@ class PlanetViewer:
         y += 16
         for line in legend.description:
             self._draw_text(line, x, y, self.tiny_font, (185, 192, 210))
+            y += 13
+
+        if self._should_apply_life_overlay(self.current_layer, self.life_overlay_mode):
+            y += 2
+            self._draw_text(
+                f"+ life overlay: {self.life_overlay_mode}",
+                x,
+                y,
+                self.tiny_font,
+                (132, 214, 154),
+            )
             y += 13
 
         y += 5
@@ -478,8 +517,12 @@ class PlanetViewer:
         text = font.render(line, True, color)
         self.screen.blit(text, (x, y))
 
+    def _should_apply_life_overlay(self, layer: LayerName, mode: OverlayMode) -> bool:
+        return should_apply_life_overlay(layer, mode)
+
     def _save_screenshot(self) -> None:
-        filename = f"planet_seed_{self.planet.config.seed}_{self.current_layer}.png"
+        overlay_suffix = "" if self.life_overlay_mode == "off" else f"_{self.life_overlay_mode}_overlay"
+        filename = f"planet_seed_{self.planet.config.seed}_{self.current_layer}{overlay_suffix}.png"
         pygame.image.save(self.screen, filename)
         print(f"Saved screenshot: {filename}")
 
@@ -488,7 +531,51 @@ def _lerp_color(low: Color, high: Color, t: float) -> Color:
     return tuple(int(a * (1.0 - t) + b * t) for a, b in zip(low, high))  # type: ignore[return-value]
 
 
-def render_layer(planet: Planet, layer: LayerName) -> np.ndarray:
+def render_layer(planet: Planet, layer: LayerName, overlay_mode: OverlayMode = "off") -> np.ndarray:
+    base = _render_base_layer(planet, layer)
+    if should_apply_life_overlay(layer, overlay_mode):
+        return apply_life_overlay(planet, base, overlay_mode)
+    return base
+
+
+def should_apply_life_overlay(layer: LayerName, overlay_mode: OverlayMode) -> bool:
+    return overlay_mode != "off" and layer not in LIFE_LAYER_NAMES
+
+
+def apply_life_overlay(planet: Planet, base_rgb: np.ndarray, overlay_mode: OverlayMode) -> np.ndarray:
+    """Blend abstract life information onto any non-life layer.
+
+    This keeps the pretty biome/abiotic maps readable while making expanding life
+    visible without switching to a dedicated life layer.
+    """
+    biomass = np.clip(planet.biomass, 0.0, 1.0)
+    mask = biomass > 0.012
+    if not np.any(mask):
+        return base_rgb
+
+    rgb = base_rgb.astype(np.float32).copy()
+    alpha = np.clip(0.12 + 0.62 * np.sqrt(biomass), 0.0, 0.68)[..., None]
+
+    if overlay_mode == "dominant" and planet.species:
+        overlay = np.zeros_like(rgb)
+        for index, species in enumerate(planet.species):
+            species_mask = mask & (planet.dominant_species_index == index)
+            if np.any(species_mask):
+                overlay[species_mask] = np.array(species.color, dtype=np.float32)
+        # Barren/no-dominant cells stay untouched.
+        valid = mask & (overlay.sum(axis=2) > 0.0)
+        rgb[valid] = rgb[valid] * (1.0 - alpha[valid]) + overlay[valid] * alpha[valid]
+        return np.clip(rgb, 0, 255).astype(np.uint8)
+
+    if overlay_mode == "biomass":
+        glow = np.array((70, 245, 120), dtype=np.float32)
+        rgb[mask] = rgb[mask] * (1.0 - alpha[mask]) + glow * alpha[mask]
+        return np.clip(rgb, 0, 255).astype(np.uint8)
+
+    return base_rgb
+
+
+def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
     if layer == "biome":
         return _render_biome(planet)
     if layer == "elevation":
@@ -523,7 +610,6 @@ def render_layer(planet: Planet, layer: LayerName) -> np.ndarray:
     if layer == "dominant_life":
         return _render_dominant_life(planet)
     raise ValueError(f"Unknown layer: {layer}")
-
 
 def _render_dominant_life(planet: Planet) -> np.ndarray:
     h, w = planet.shape

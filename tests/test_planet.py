@@ -1,6 +1,7 @@
 import numpy as np
 
 from alife import Planet, PlanetConfig
+from alife.viewer import render_layer, should_apply_life_overlay
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -259,3 +260,33 @@ def test_life_evolution_is_deterministic_for_same_seed():
     assert [s.name for s in p1.species] == [s.name for s in p2.species]
     np.testing.assert_allclose(p1.populations, p2.populations)
     np.testing.assert_allclose(p1.biomass, p2.biomass)
+
+
+def test_life_overlay_changes_biome_render_when_biomass_exists():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=1213,
+        abiogenesis_rate=0.20,
+        abiogenesis_fertility_threshold=0.25,
+    )
+    planet = Planet.generate(config)
+    planet.step(600)
+
+    plain = render_layer(planet, "biome", overlay_mode="off")
+    overlay = render_layer(planet, "biome", overlay_mode="biomass")
+
+    assert should_apply_life_overlay("biome", "biomass")
+    assert not should_apply_life_overlay("biomass", "biomass")
+    assert plain.shape == overlay.shape == (32, 64, 3)
+    assert not np.array_equal(plain, overlay)
+
+
+def test_life_overlay_does_not_modify_dedicated_life_layers():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=1314))
+    planet.step(600)
+
+    plain = render_layer(planet, "biomass", overlay_mode="off")
+    overlay = render_layer(planet, "biomass", overlay_mode="dominant")
+
+    np.testing.assert_array_equal(plain, overlay)
