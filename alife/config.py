@@ -28,7 +28,7 @@ class PlanetConfig:
     pole_temperature_c: float = -18.0
     altitude_cooling_c: float = 30.0
     ocean_moderation: float = 0.35
-    seasonal_period_ticks: int = 2400
+    seasonal_period_ticks: int = 0  # 0 = derive a deterministic random year length from the seed
     seasonal_temperature_swing_c: float = 8.0
     seasonal_light_swing: float = 0.28
 
@@ -105,8 +105,8 @@ class PlanetConfig:
             raise ValueError("detail_octaves must be >= 1.")
         if not 0.0 < self.volcanic_activity_fraction < 0.5:
             raise ValueError("volcanic_activity_fraction must be between 0 and 0.5.")
-        if self.seasonal_period_ticks < 10:
-            raise ValueError("seasonal_period_ticks must be >= 10.")
+        if self.seasonal_period_ticks != 0 and self.seasonal_period_ticks < 10:
+            raise ValueError("seasonal_period_ticks must be 0/auto or >= 10.")
         if self.volcanic_pulse_radius <= 0:
             raise ValueError("volcanic_pulse_radius must be positive.")
         if self.max_species < 1:

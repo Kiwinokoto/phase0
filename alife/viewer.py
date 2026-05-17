@@ -12,10 +12,15 @@ from .planet import Planet
 
 LayerName = str
 OverlayMode = str
+WeatherOverlayMode = str
+ProjectionMode = str
 Color = tuple[int, int, int]
 
 LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life", "biotic_pressure")
+ATMOSPHERE_LAYER_NAMES: tuple[LayerName, ...] = ("clouds", "rain")
 LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
+WEATHER_OVERLAY_MODES: tuple[WeatherOverlayMode, ...] = ("off", "clouds", "rain", "all")
+PROJECTION_MODES: tuple[ProjectionMode, ...] = ("2d", "3d")
 
 
 @dataclass(frozen=True)
@@ -66,7 +71,9 @@ class GeologicalIntroStage:
     description: tuple[str, ...]
 
 
-INTRO_DURATION_FRAMES = 960
+INTRO_DURATION_FRAMES = 1560
+EXTINCT_CRIMSON: Color = (205, 46, 62)
+EXTINCT_DARK: Color = (82, 28, 38)
 
 
 LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
@@ -111,6 +118,18 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
         description=("Solar input by latitude and", "season."),
         colors=((20, 18, 45), (255, 235, 140)),
         labels=("dark", "bright"),
+    ),
+    "clouds": LayerLegend(
+        title="Clouds",
+        description=("Procedural atmospheric veil.", "Opacity drifts with season/tick."),
+        colors=((18, 22, 32), (120, 135, 155), (235, 240, 245)),
+        labels=("clear", "haze", "cloud"),
+    ),
+    "rain": LayerLegend(
+        title="Rain / storms",
+        description=("Stylized rain over cloud cover.", "Storm flashes favor wet volcanic zones."),
+        colors=((12, 16, 26), (82, 112, 155), (225, 238, 255)),
+        labels=("dry", "rain", "storm"),
     ),
     "volcanism": LayerLegend(
         title="Volcanism",
@@ -191,6 +210,8 @@ class PlanetViewer:
         "water",
         "humidity",
         "light",
+        "clouds",
+        "rain",
         "volcanism",
         "minerals",
         "nutrients",
@@ -217,6 +238,8 @@ class PlanetViewer:
         self.skip_intro = False
         self.fullscreen = bool(start_fullscreen)
         self.life_overlay_mode: OverlayMode = "biomass"
+        self.weather_overlay_mode: WeatherOverlayMode = "clouds"
+        self.projection_mode: ProjectionMode = "2d"
         self.speed = planet.config.initial_speed
         self.selected_cell: tuple[int, int] | None = None  # stored as (x, y) map coordinates
         self.selected_species_id: int | None = None
@@ -227,11 +250,15 @@ class PlanetViewer:
         self.genealogy_modal_rect = pygame.Rect(0, 0, 0, 0)
         self.genealogy_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.genealogy_modal_row_rects: list[tuple[pygame.Rect, int]] = []
+        self.event_log_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.event_log_modal_open = False
+        self.event_log_modal_rect = pygame.Rect(0, 0, 0, 0)
+        self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.setup_control_rects: list[tuple[pygame.Rect, str, str]] = []
         self.setup_slider_rects: list[tuple[pygame.Rect, str]] = []
         self.active_setup_slider: tuple[str, pygame.Rect] | None = None
         self.section_header_rects: list[tuple[pygame.Rect, str]] = []
-        self.collapsed_sections: set[str] = set()
+        self.collapsed_sections: set[str] = {"simulation", "life"}
 
         self.font = pygame.font.SysFont("monospace", 16)
         self.layer_font = pygame.font.SysFont("monospace", 20, bold=True)
@@ -251,11 +278,14 @@ class PlanetViewer:
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
         self.life_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.weather_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
         self._update_layout()
 
         self.clock = pygame.time.Clock()
         self.cached_layer: LayerName | None = None
         self.cached_overlay_mode: OverlayMode | None = None
+        self.cached_weather_overlay_mode: WeatherOverlayMode | None = None
+        self.cached_projection_mode: ProjectionMode | None = None
         self.cached_surface: pygame.Surface | None = None
         self.cached_surface_size: tuple[int, int] | None = None
 
@@ -300,12 +330,20 @@ class PlanetViewer:
         pygame.quit()
 
     def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
+        if self.event_log_modal_open:
+            self._handle_event_log_modal_click(pos)
+            return
+
         if self.genealogy_modal_species_id is not None:
             self._handle_genealogy_modal_click(pos)
             return
 
         if self.fullscreen_button_rect.collidepoint(pos):
             self._toggle_fullscreen()
+            return
+
+        if self.projection_button_rect.collidepoint(pos):
+            self._cycle_projection_mode()
             return
 
         if self.in_setup_screen:
@@ -324,8 +362,16 @@ class PlanetViewer:
             self._cycle_life_overlay()
             return
 
+        if self.weather_overlay_button_rect.collidepoint(pos):
+            self._cycle_weather_overlay()
+            return
+
         if self.genealogy_button_rect.collidepoint(pos) and self.selected_species_id is not None:
             self.genealogy_modal_species_id = self.selected_species_id
+            return
+
+        if self.event_log_button_rect.collidepoint(pos):
+            self.event_log_modal_open = True
             return
 
         for rect, section_key in self.section_header_rects:
@@ -358,7 +404,18 @@ class PlanetViewer:
         if not self.genealogy_modal_rect.collidepoint(pos):
             self.genealogy_modal_species_id = None
 
+    def _handle_event_log_modal_click(self, pos: tuple[int, int]) -> None:
+        if self.event_log_modal_close_rect.collidepoint(pos):
+            self.event_log_modal_open = False
+            return
+        # Click outside the modal to close it.
+        if not self.event_log_modal_rect.collidepoint(pos):
+            self.event_log_modal_open = False
+
     def _handle_key(self, key: int) -> bool:
+        if self.event_log_modal_open and key == pygame.K_ESCAPE:
+            self.event_log_modal_open = False
+            return True
         if self.genealogy_modal_species_id is not None and key == pygame.K_ESCAPE:
             self.genealogy_modal_species_id = None
             return True
@@ -367,6 +424,8 @@ class PlanetViewer:
         if self.in_setup_screen:
             if key in (pygame.K_f, pygame.K_F11):
                 self._toggle_fullscreen()
+            elif key == pygame.K_g:
+                self._cycle_projection_mode()
             elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
                 if self.intro_active:
                     self._start_simulation()
@@ -391,8 +450,12 @@ class PlanetViewer:
             self.speed = max(1, self.speed // 2)
         elif key in (pygame.K_f, pygame.K_F11):
             self._toggle_fullscreen()
+        elif key == pygame.K_g:
+            self._cycle_projection_mode()
         elif key == pygame.K_o:
             self._cycle_life_overlay()
+        elif key == pygame.K_w:
+            self._cycle_weather_overlay()
         elif key == pygame.K_r:
             self.planet = self.planet.regenerate(seed=random_seed())
             self.selected_cell = None
@@ -416,6 +479,16 @@ class PlanetViewer:
         self.life_overlay_mode = LIFE_OVERLAY_MODES[(index + 1) % len(LIFE_OVERLAY_MODES)]
         self._invalidate_cache()
 
+    def _cycle_weather_overlay(self) -> None:
+        index = WEATHER_OVERLAY_MODES.index(self.weather_overlay_mode)
+        self.weather_overlay_mode = WEATHER_OVERLAY_MODES[(index + 1) % len(WEATHER_OVERLAY_MODES)]
+        self._invalidate_cache()
+
+    def _cycle_projection_mode(self) -> None:
+        index = PROJECTION_MODES.index(self.projection_mode)
+        self.projection_mode = PROJECTION_MODES[(index + 1) % len(PROJECTION_MODES)]
+        self._invalidate_cache()
+
     def _update_layout(self) -> None:
         screen_w, screen_h = self.screen.get_size()
         panel_w = min(self.side_panel_width, max(300, screen_w // 3))
@@ -437,6 +510,8 @@ class PlanetViewer:
     def _invalidate_cache(self) -> None:
         self.cached_layer = None
         self.cached_overlay_mode = None
+        self.cached_weather_overlay_mode = None
+        self.cached_projection_mode = None
         self.cached_surface = None
         self.cached_surface_size = None
 
@@ -449,13 +524,18 @@ class PlanetViewer:
         self._draw_panel()
         if self.genealogy_modal_species_id is not None:
             self._draw_genealogy_modal()
+        if self.event_log_modal_open:
+            self._draw_event_log_modal()
 
     def _get_map_surface(self) -> pygame.Surface:
         layer = "biome" if self.in_setup_screen else self.current_layer
         overlay_mode = "off" if self.in_setup_screen else self.life_overlay_mode
+        weather_overlay_mode = "off" if self.in_setup_screen else self.weather_overlay_mode
         if (
             self.cached_layer == layer
             and self.cached_overlay_mode == overlay_mode
+            and self.cached_weather_overlay_mode == weather_overlay_mode
+            and self.cached_projection_mode == self.projection_mode
             and self.cached_surface is not None
             and self.cached_surface_size == self.map_rect.size
         ):
@@ -465,13 +545,17 @@ class PlanetViewer:
             progress = self._intro_progress()
             rgb = render_geological_intro_layer(self.planet, progress)
         else:
-            rgb = render_layer(self.planet, layer, overlay_mode=overlay_mode)
+            rgb = render_layer(self.planet, layer, overlay_mode=overlay_mode, weather_overlay_mode=weather_overlay_mode)
+            if self.projection_mode == "3d":
+                rgb = render_globe_texture(rgb, self.map_rect.size, rotation=self._globe_rotation())
         surface = pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
         if surface.get_size() != self.map_rect.size:
             surface = pygame.transform.scale(surface, self.map_rect.size)
 
         self.cached_layer = layer
         self.cached_overlay_mode = overlay_mode
+        self.cached_weather_overlay_mode = weather_overlay_mode
+        self.cached_projection_mode = self.projection_mode
         self.cached_surface = surface
         self.cached_surface_size = self.map_rect.size
         return surface
@@ -485,6 +569,10 @@ class PlanetViewer:
         self.genealogy_modal_row_rects = []
         self.genealogy_button_rect = pygame.Rect(0, 0, 0, 0)
         self.genealogy_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.event_log_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.weather_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.projection_button_rect = pygame.Rect(0, 0, 0, 0)
         self.setup_control_rects = []
         self.setup_slider_rects = []
         self.section_header_rects = []
@@ -542,9 +630,13 @@ class PlanetViewer:
         y += 24
 
         button_h = 28
+        gap = 8
+        half_w = max(120, (width - gap) // 2)
         fullscreen_label = "Window" if self.fullscreen else "Fullscreen"
-        self.fullscreen_button_rect = pygame.Rect(x, y, min(170, width), button_h)
+        self.fullscreen_button_rect = pygame.Rect(x, y, half_w, button_h)
         self._draw_button(self.fullscreen_button_rect, fullscreen_label)
+        self.projection_button_rect = pygame.Rect(x + half_w + gap, y, half_w, button_h)
+        self._draw_button(self.projection_button_rect, f"View: {self.projection_mode.upper()}")
         y += button_h + 12
 
         y = self._draw_section_title("Generated planet", x, y, width)
@@ -560,6 +652,8 @@ class PlanetViewer:
                 ("fertility", f"{self.planet.fertility.mean():.2f}"),
                 ("nutrients", f"{self.planet.nutrients.mean():.2f}"),
                 ("volcanism", f"{self.planet.volcanism.mean():.2f}"),
+                ("year", f"{self.planet.config.seasonal_period_ticks} ticks"),
+                ("cloud/rain", self._weather_mean_label()),
             ),
             x,
             y,
@@ -904,10 +998,14 @@ class PlanetViewer:
             (
                 ("seed", str(self.planet.config.seed)),
                 ("tick", str(self.planet.tick)),
+                ("year/day", self._season_position_label()),
+                ("season", self._season_label()),
                 ("speed", f"x{self.speed}"),
                 ("state", "paused" if self.paused else "running"),
                 ("mode", "fullscreen" if self.fullscreen else "window"),
+                ("view", self.projection_mode),
                 ("life", self.life_overlay_mode),
+                ("weather", self.weather_overlay_mode),
             ),
             x,
             y,
@@ -922,22 +1020,28 @@ class PlanetViewer:
         events = self.planet.recent_events(limit=5)
         if not events:
             self._draw_text("No major event yet. Let the world run.", x, y, self.tiny_font, (145, 154, 178))
-            return y + 16
+            y += 18
+        else:
+            for event in events:
+                text = f"t{event.tick}: {event.message}"
+                self._draw_text(self._clip_text(text, 52), x, y, self.tiny_font, self._event_kind_color(event.kind))
+                y += 14
 
-        for event in events:
-            color = (202, 210, 230)
-            if event.kind == "birth":
-                color = (142, 222, 158)
-            elif event.kind == "branch":
-                color = (155, 188, 245)
-            elif event.kind == "extinction":
-                color = (226, 150, 128)
-            elif event.kind == "volcanism":
-                color = (238, 174, 92)
-            text = f"t{event.tick}: {event.message}"
-            self._draw_text(self._clip_text(text, 52), x, y, self.tiny_font, color)
-            y += 14
-        return y
+        y += 5
+        self.event_log_button_rect = pygame.Rect(x, y, width, 24)
+        self._draw_button(self.event_log_button_rect, "Open event summary")
+        return y + 30
+
+    def _event_kind_color(self, kind: str) -> Color:
+        if kind == "birth":
+            return (142, 222, 158)
+        if kind == "branch":
+            return (155, 188, 245)
+        if kind == "extinction":
+            return EXTINCT_CRIMSON
+        if kind == "volcanism":
+            return (238, 174, 92)
+        return (202, 210, 230)
 
 
     def _draw_life_summary(self, x: int, y: int, width: int) -> int:
@@ -977,6 +1081,7 @@ class PlanetViewer:
                 ("chem", f"{self.planet.chemical_energy.mean():.2f}"),
                 ("tox", f"{self.planet.toxicity.mean():.2f}"),
                 ("fert", f"{self.planet.fertility.mean():.2f}"),
+                ("cloud/rain", self._weather_mean_label()),
             ),
             x,
             y,
@@ -1052,16 +1157,24 @@ class PlanetViewer:
         parent_name = "seed" if parent is None else parent.name
         children = self.planet.descendant_count(species.id)
 
-        # Small color/name header.
+        # Small color/name header. Extinct selected lineages stay visible so
+        # the observer does not lose context when a watched branch disappears.
         header_rect = pygame.Rect(x, y, width, 22)
-        pygame.draw.rect(self.screen, (23, 28, 38), header_rect, border_radius=5)
-        pygame.draw.rect(self.screen, (58, 68, 90), header_rect, 1, border_radius=5)
+        header_fill = EXTINCT_DARK if species.is_extinct else (23, 28, 38)
+        header_border = EXTINCT_CRIMSON if species.is_extinct else (58, 68, 90)
+        title_color = EXTINCT_CRIMSON if species.is_extinct else (232, 238, 250)
+        pygame.draw.rect(self.screen, header_fill, header_rect, border_radius=5)
+        pygame.draw.rect(self.screen, header_border, header_rect, 1, border_radius=5)
         swatch = pygame.Rect(x + 7, y + 5, 12, 12)
         pygame.draw.rect(self.screen, species.color, swatch)
         pygame.draw.rect(self.screen, (112, 120, 142), swatch, 1)
         title = f"{species.name} — {strategy}"
-        self._draw_text(self._clip_text(title, 44), x + 26, y + 3, self.small_font, (232, 238, 250))
+        self._draw_text(self._clip_text(title, 44), x + 26, y + 3, self.small_font, title_color)
         y += 28
+        if species.is_extinct:
+            extinct_text = "EXTINCT" if species.extinct_tick is None else f"EXTINCT at tick {species.extinct_tick}"
+            self._draw_text(extinct_text, x, y, self.tiny_font, EXTINCT_CRIMSON)
+            y += 15
 
         y = self._draw_key_value_grid(
             (
@@ -1146,9 +1259,89 @@ class PlanetViewer:
         color_rect = pygame.Rect(x + 3, y + 2, 10, 10)
         pygame.draw.rect(self.screen, species.color, color_rect)
         pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
-        text_color = (234, 242, 235) if selected else (190, 199, 218)
+        if species.is_extinct:
+            text_color = EXTINCT_CRIMSON
+        else:
+            text_color = (234, 242, 235) if selected else (190, 199, 218)
         self._draw_text(self._clip_text(label, 49), x + 18, y, self.tiny_font, text_color)
         return y + row_h
+
+    def _draw_event_log_modal(self) -> None:
+        events = list(reversed(self.planet.event_log))
+        screen_w, screen_h = self.screen.get_size()
+        overlay = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
+        overlay.fill((3, 5, 10, 168))
+        self.screen.blit(overlay, (0, 0))
+
+        modal_w = min(920, screen_w - 90)
+        modal_h = min(700, screen_h - 86)
+        modal_w = max(540, modal_w)
+        modal_h = max(440, modal_h)
+        modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
+        self.event_log_modal_rect = modal
+
+        pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
+        pygame.draw.rect(self.screen, (84, 96, 126), modal, 1, border_radius=12)
+        pygame.draw.rect(self.screen, (42, 49, 68), modal.inflate(-2, -2), 1, border_radius=11)
+
+        x = modal.left + 22
+        y = modal.top + 18
+        width = modal.width - 44
+        close_rect = pygame.Rect(modal.right - 40, modal.top + 14, 24, 24)
+        self.event_log_modal_close_rect = close_rect
+        self._draw_button(close_rect, "×")
+
+        self._draw_text("World event summary", x, y, self.font, (238, 243, 252))
+        y += 24
+        self._draw_text(
+            "Major births, branches, extinctions and volcanic pulses.",
+            x,
+            y,
+            self.tiny_font,
+            (165, 176, 200),
+        )
+        y += 22
+
+        counts = self._event_counts()
+        y = self._draw_key_value_grid(
+            (
+                ("events", str(len(self.planet.event_log))),
+                ("births", str(counts.get("birth", 0))),
+                ("branches", str(counts.get("branch", 0))),
+                ("extinct", str(counts.get("extinction", 0))),
+                ("volcanic", str(counts.get("volcanism", 0))),
+                ("current tick", str(self.planet.tick)),
+            ),
+            x,
+            y,
+            width,
+            columns=3,
+        )
+        y += 16
+
+        row_top = y
+        row_bottom = modal.bottom - 42
+        if not events:
+            self._draw_text("No major event yet. Let the world run.", x, row_top, self.tiny_font, (150, 160, 184))
+        else:
+            visible_rows = max(1, (row_bottom - row_top) // 18)
+            for event in events[:visible_rows]:
+                color = self._event_kind_color(event.kind)
+                loc = "" if event.location is None else f"  x{event.location[0]} y{event.location[1]}"
+                text = f"t{event.tick:<5} {event.kind:<10} {event.message}{loc}"
+                self._draw_text(self._clip_text(text, max(24, width // 7)), x, y, self.tiny_font, color)
+                y += 18
+            remaining = len(events) - visible_rows
+            if remaining > 0 and y <= row_bottom - 14:
+                self._draw_text(f"… {remaining} older events hidden", x, y, self.tiny_font, (150, 160, 184))
+
+        self._draw_text("Esc, ×, or outside click closes this summary.", x, modal.bottom - 28, self.tiny_font, (155, 166, 190))
+
+    def _event_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for event in self.planet.event_log:
+            counts[event.kind] = counts.get(event.kind, 0) + 1
+        return counts
 
     def _draw_genealogy_modal(self) -> None:
         species = self.planet.species_by_id(self.genealogy_modal_species_id)
@@ -1169,8 +1362,9 @@ class PlanetViewer:
         modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
         self.genealogy_modal_rect = modal
 
+        modal_border = EXTINCT_CRIMSON if species.is_extinct else species.color
         pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
-        pygame.draw.rect(self.screen, species.color, modal, 1, border_radius=12)
+        pygame.draw.rect(self.screen, modal_border, modal, 1, border_radius=12)
         pygame.draw.rect(self.screen, (74, 84, 112), modal.inflate(-2, -2), 1, border_radius=11)
 
         x = modal.left + 22
@@ -1189,7 +1383,7 @@ class PlanetViewer:
             x + 22,
             y + 21,
             self.tiny_font,
-            (178, 188, 210),
+            EXTINCT_CRIMSON if species.is_extinct else (178, 188, 210),
         )
         y += 54
 
@@ -1300,7 +1494,10 @@ class PlanetViewer:
         total = self.planet.species_total_population(species.id)
         extinct = "† " if species.is_extinct else ""
         text = f"{extinct}{label}  t{species.created_tick}  {total:.1f}"
-        color = (235, 242, 236) if selected else (190, 200, 220)
+        if species.is_extinct:
+            color = EXTINCT_CRIMSON
+        else:
+            color = (235, 242, 236) if selected else (190, 200, 220)
         max_chars = max(12, (width - indent - 22) // 7)
         self._draw_text(self._clip_text(text, max_chars), x + 20 + indent, y + 2, self.tiny_font, color)
         return y + row_h
@@ -1313,39 +1510,100 @@ class PlanetViewer:
         if index is None:
             return
         pop = np.clip(self.planet.populations[index], 0.0, 1.0)
-        if float(pop.max()) <= 0.0:
-            return
+        has_visible_distribution = float(pop.max()) > 0.0
 
-        h, w = pop.shape
-        alpha = np.clip(28 + 190 * np.sqrt(pop / max(float(pop.max()), 0.025)), 0, 218).astype(np.uint8)
-        alpha[pop <= 0.004] = 0
-        if int(alpha.max()) <= 0:
-            return
+        if has_visible_distribution:
+            h, w = pop.shape
+            alpha = np.clip(28 + 190 * np.sqrt(pop / max(float(pop.max()), 0.025)), 0, 218).astype(np.uint8)
+            alpha[pop <= 0.004] = 0
+            if int(alpha.max()) > 0:
+                if self.projection_mode == "3d":
+                    overlay = render_globe_scalar_overlay(
+                        pop,
+                        species.color,
+                        self.map_rect.size,
+                        rotation=self._globe_rotation(),
+                    )
+                    self.screen.blit(overlay, self.map_rect.topleft)
+                else:
+                    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+                    color = np.array(species.color, dtype=np.uint8)
+                    rgb[:, :] = color
+                    surface = pygame.Surface((w, h), pygame.SRCALPHA)
+                    pixels = pygame.surfarray.pixels3d(surface)
+                    pixels[:] = np.transpose(rgb, (1, 0, 2))
+                    del pixels
+                    pixels_alpha = pygame.surfarray.pixels_alpha(surface)
+                    pixels_alpha[:] = np.transpose(alpha, (1, 0))
+                    del pixels_alpha
+                    scaled = pygame.transform.scale(surface, self.map_rect.size)
+                    self.screen.blit(scaled, self.map_rect.topleft)
 
-        rgb = np.zeros((h, w, 3), dtype=np.uint8)
-        color = np.array(species.color, dtype=np.uint8)
-        rgb[:, :] = color
-        surface = pygame.Surface((w, h), pygame.SRCALPHA)
-        pixels = pygame.surfarray.pixels3d(surface)
-        pixels[:] = np.transpose(rgb, (1, 0, 2))
-        del pixels
-        pixels_alpha = pygame.surfarray.pixels_alpha(surface)
-        pixels_alpha[:] = np.transpose(alpha, (1, 0))
-        del pixels_alpha
-        scaled = pygame.transform.scale(surface, self.map_rect.size)
-        self.screen.blit(scaled, self.map_rect.topleft)
-
-        # Small readable label on the map itself.
-        label = f"selected: {species.name}"
-        text = self.small_font.render(label, True, (245, 248, 240))
+        # Small readable label on the map itself. Keep it visible even after
+        # extinction so the current observer state never looks like it vanished.
+        suffix = " (extinct)" if species.is_extinct else ""
+        label = f"selected: {species.name}{suffix}"
+        text_color = EXTINCT_CRIMSON if species.is_extinct else (245, 248, 240)
+        border_color = EXTINCT_CRIMSON if species.is_extinct else species.color
+        text = self.small_font.render(label, True, text_color)
         bg = pygame.Rect(self.map_rect.left + 12, self.map_rect.top + 12, text.get_width() + 14, text.get_height() + 8)
         pygame.draw.rect(self.screen, (16, 20, 26), bg, border_radius=6)
-        pygame.draw.rect(self.screen, species.color, bg, 1, border_radius=6)
+        pygame.draw.rect(self.screen, border_color, bg, 1, border_radius=6)
         self.screen.blit(text, (bg.left + 7, bg.top + 4))
 
+
+    def _globe_rotation(self) -> float:
+        period = max(1, int(self.planet.config.seasonal_period_ticks))
+        seed_offset = (int(self.planet.config.seed) % 1000) / 1000.0 * 2.0 * np.pi
+        return seed_offset + (float(self.planet.tick) / max(1.0, period * 0.72)) * 2.0 * np.pi
+
+    def _globe_center_radius(self) -> tuple[tuple[int, int], int]:
+        radius = max(8, int(min(self.map_rect.width, self.map_rect.height) * 0.46))
+        center = (self.map_rect.centerx, self.map_rect.centery)
+        return center, radius
+
+    def _cell_to_screen_pos(self, cell_x: int, cell_y: int) -> tuple[int, int] | None:
+        if self.projection_mode != "3d":
+            width = self.planet.config.width
+            height = self.planet.config.height
+            px = self.map_rect.left + int((cell_x / width) * self.map_rect.width)
+            py = self.map_rect.top + int((cell_y / height) * self.map_rect.height)
+            return (px, py)
+
+        width = self.planet.config.width
+        height = self.planet.config.height
+        u = (float(cell_x) + 0.5) / max(1, width)
+        v = (float(cell_y) + 0.5) / max(1, height)
+        lon = 2.0 * np.pi * u - self._globe_rotation()
+        lon = (lon + np.pi) % (2.0 * np.pi) - np.pi
+        lat = (0.5 - v) * np.pi
+        screen_x = np.sin(lon)
+        z = np.cos(lon) * np.cos(lat)
+        if z <= 0.0:
+            return None
+        screen_y = -np.sin(lat)
+        center, radius = self._globe_center_radius()
+        return (center[0] + int(screen_x * np.cos(lat) * radius), center[1] + int(screen_y * radius))
     def _screen_pos_to_cell(self, pos: tuple[int, int]) -> tuple[int, int] | None:
         if not self.map_rect.collidepoint(pos):
             return None
+
+        if self.projection_mode == "3d":
+            center, radius = self._globe_center_radius()
+            nx = (pos[0] - center[0]) / max(1, radius)
+            ny = (pos[1] - center[1]) / max(1, radius)
+            r2 = nx * nx + ny * ny
+            if r2 > 1.0:
+                return None
+            nz = float(np.sqrt(max(0.0, 1.0 - r2)))
+            lon = np.arctan2(nx, nz) + self._globe_rotation()
+            lat = np.arcsin(float(np.clip(-ny, -1.0, 1.0)))
+            u = (lon / (2.0 * np.pi)) % 1.0
+            v = 0.5 - (lat / np.pi)
+            cell_x = int(np.clip(u * self.planet.config.width, 0, self.planet.config.width - 1))
+            cell_y = int(np.clip(v * self.planet.config.height, 0, self.planet.config.height - 1))
+            return (cell_x, cell_y)
+
         rel_x = (pos[0] - self.map_rect.left) / max(1, self.map_rect.width)
         rel_y = (pos[1] - self.map_rect.top) / max(1, self.map_rect.height)
         cell_x = int(np.clip(rel_x * self.planet.config.width, 0, self.planet.config.width - 1))
@@ -1357,13 +1615,14 @@ class PlanetViewer:
             return
         cell_x, cell_y = self.selected_cell
         width = self.planet.config.width
-        height = self.planet.config.height
-        px = self.map_rect.left + int((cell_x / width) * self.map_rect.width)
-        py = self.map_rect.top + int((cell_y / height) * self.map_rect.height)
-        cell_w = max(2, int(np.ceil(self.map_rect.width / width)))
-        cell_h = max(2, int(np.ceil(self.map_rect.height / height)))
-        radius_px = max(8, int(self.selected_radius * (self.map_rect.width / width)))
-        center = (px + cell_w // 2, py + cell_h // 2)
+        center = self._cell_to_screen_pos(cell_x, cell_y)
+        if center is None:
+            return
+        if self.projection_mode == "3d":
+            _globe_center, globe_radius = self._globe_center_radius()
+            radius_px = max(7, int(self.selected_radius * (globe_radius / max(1, width))))
+        else:
+            radius_px = max(8, int(self.selected_radius * (self.map_rect.width / width)))
         pygame.draw.circle(self.screen, (245, 245, 235), center, radius_px, 1)
         pygame.draw.line(self.screen, (245, 245, 235), (center[0] - radius_px - 3, center[1]), (center[0] + radius_px + 3, center[1]), 1)
         pygame.draw.line(self.screen, (245, 245, 235), (center[0], center[1] - radius_px - 3), (center[0], center[1] + radius_px + 3), 1)
@@ -1392,9 +1651,18 @@ class PlanetViewer:
         self.fullscreen_button_rect = pygame.Rect(x, y, button_w, button_h)
         self._draw_button(self.fullscreen_button_rect, fullscreen_label)
 
+        projection_label = f"View: {self.projection_mode.upper()}"
+        self.projection_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
+        self._draw_button(self.projection_button_rect, projection_label)
+
+        y += button_h + 7
         overlay_label = f"Life: {self.life_overlay_mode}"
-        self.life_overlay_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
+        self.life_overlay_button_rect = pygame.Rect(x, y, button_w, button_h)
         self._draw_button(self.life_overlay_button_rect, overlay_label)
+
+        weather_label = f"Weather: {self.weather_overlay_mode}"
+        self.weather_overlay_button_rect = pygame.Rect(x + button_w + gap, y, button_w, button_h)
+        self._draw_button(self.weather_overlay_button_rect, weather_label)
         return y + button_h
 
     def _draw_checkbox_row(self, rect: pygame.Rect, label: str, checked: bool) -> None:
@@ -1444,6 +1712,16 @@ class PlanetViewer:
                 y,
                 self.tiny_font,
                 (132, 214, 154),
+            )
+            y += 13
+        if self._should_apply_weather_overlay(self.current_layer, self.weather_overlay_mode):
+            y += 2
+            self._draw_text(
+                f"+ weather overlay: {self.weather_overlay_mode}",
+                x,
+                y,
+                self.tiny_font,
+                (170, 198, 232),
             )
             y += 13
 
@@ -1505,8 +1783,27 @@ class PlanetViewer:
     def _should_apply_life_overlay(self, layer: LayerName, mode: OverlayMode) -> bool:
         return should_apply_life_overlay(layer, mode)
 
+    def _should_apply_weather_overlay(self, layer: LayerName, mode: WeatherOverlayMode) -> bool:
+        return should_apply_weather_overlay(layer, mode)
+
+    def _season_position_label(self) -> str:
+        year, day, period = season_position(self.planet)
+        return f"Y{year} d{day}/{period}"
+
+    def _season_label(self) -> str:
+        return season_label(self.planet)
+
+    def _weather_mean_label(self) -> str:
+        cloud_alpha, rain_alpha, _lightning, _cloud_rgb = _atmosphere_visual_fields(self.planet)
+        return f"{float(cloud_alpha.mean()):.2f}/{float(rain_alpha.mean()):.2f}"
+
     def _save_screenshot(self) -> None:
-        overlay_suffix = "" if self.life_overlay_mode == "off" else f"_{self.life_overlay_mode}_overlay"
+        suffixes: list[str] = []
+        if self.life_overlay_mode != "off":
+            suffixes.append(f"life_{self.life_overlay_mode}")
+        if self.weather_overlay_mode != "off":
+            suffixes.append(f"weather_{self.weather_overlay_mode}")
+        overlay_suffix = "" if not suffixes else "_" + "_".join(suffixes)
         filename = f"planet_seed_{self.planet.config.seed}_{self.current_layer}{overlay_suffix}.png"
         pygame.image.save(self.screen, filename)
         print(f"Saved screenshot: {filename}")
@@ -1524,41 +1821,73 @@ def _smoothstep(edge0: float, edge1: float, x: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
+def season_position(planet: Planet) -> tuple[int, int, int]:
+    period = max(10, int(planet.config.seasonal_period_ticks))
+    year = int(planet.tick // period) + 1
+    day = int(planet.tick % period) + 1
+    return year, day, period
+
+
+def season_label(planet: Planet) -> str:
+    _year, day, period = season_position(planet)
+    phase = day / max(1, period)
+    # The model has opposite hemispheric seasons. This label is a compact
+    # observer hint, not a physical calendar.
+    if phase < 0.125 or phase >= 0.875:
+        return "equinox / transition"
+    if phase < 0.375:
+        return "north cooling / south warming"
+    if phase < 0.625:
+        return "solstice-like peak"
+    return "north warming / south cooling"
+
+
 def geological_intro_stage(progress: float) -> GeologicalIntroStage:
     """Return the narrative stage for the optional formation intro."""
     p = float(np.clip(progress, 0.0, 1.0))
-    if p < 0.18:
+    if p < 0.14:
         return GeologicalIntroStage(
-            "Accretion / cloud collapse",
-            ("Dust, rock and heat gather into", "a young unstable planetoid."),
+            "Void / stellar nursery",
+            ("A quiet field of dust and light", "begins to gather in the dark."),
         )
-    if p < 0.40:
+    if p < 0.30:
         return GeologicalIntroStage(
-            "Magma ocean",
-            ("The crust is mostly molten.", "Volcanism writes the first geology."),
+            "Cloud collapse",
+            ("The cloud folds inward, bright", "filaments falling toward a core."),
+        )
+    if p < 0.48:
+        return GeologicalIntroStage(
+            "Explosive volcanic world",
+            ("The young surface burns, cracks", "and throws fire into the sky."),
         )
     if p < 0.62:
         return GeologicalIntroStage(
-            "Heavy rain / condensation",
-            ("The atmosphere cools and collapses", "into long violent rains."),
+            "Smoke and primordial clouds",
+            ("Ash, steam and a thick atmosphere", "hide the cooling crust below."),
         )
-    if p < 0.84:
+    if p < 0.76:
         return GeologicalIntroStage(
-            "Cooling crust",
-            ("Basins fill, highlands harden,", "chemistry becomes less chaotic."),
+            "Condensation / long rains",
+            ("Clouds collapse into rain; basins", "begin to collect the first seas."),
+        )
+    if p < 0.90:
+        return GeologicalIntroStage(
+            "Oceans and continents emerge",
+            ("Blue water finds the low places", "while highlands harden into land."),
         )
     return GeologicalIntroStage(
         "Young stable planet",
-        ("The previewed world is now ready", "for proto-ecology to begin."),
+        ("The previewed world is ready", "for proto-ecology to begin."),
     )
 
 
 def render_geological_intro_layer(planet: Planet, progress: float) -> np.ndarray:
     """Render a deterministic, visual-only formation prelude frame.
 
-    The generated planet is already final; this function only tells a short
-    aesthetic story about how the world cools into that final state. It must not
-    mutate the planet or feed back into simulation dynamics.
+    This is intentionally cinematic, not a geophysical model. It uses the final
+    generated planet fields as targets, then tells a deterministic formation
+    story: void, cloud collapse, magma, smoke/clouds, rain, and final reveal.
+    The function must never mutate simulation state.
     """
     p = float(np.clip(progress, 0.0, 1.0))
     elevation = np.clip(planet.elevation, 0.0, 1.0).astype(np.float32)
@@ -1567,63 +1896,207 @@ def render_geological_intro_layer(planet: Planet, progress: float) -> np.ndarray
     final_biome = _render_biome(planet).astype(np.float32)
 
     h, w = planet.shape
-    yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
-    xx = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
-    wave = 0.5 + 0.5 * np.sin((xx * 17.0 + yy * 11.0 + p * 8.0) * np.pi)
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
+    radius = np.sqrt((xx * 0.92) ** 2 + (yy * 1.22) ** 2)
+    angle = np.arctan2(yy, xx + 1e-6)
+    wave = 0.5 + 0.5 * np.sin((xx * 19.0 + yy * 13.0 + p * 10.0) * np.pi)
+    spiral = 0.5 + 0.5 * np.sin(8.5 * angle + 17.0 * radius - p * 18.0)
+    fine = 0.5 + 0.5 * np.sin((xx * 73.0 - yy * 41.0 + p * 26.0) * np.pi)
 
     volcanic_setting = float(np.clip(planet.config.volcanic_activity_fraction / 0.24, 0.0, 1.0))
     heat_setting = float(np.clip((planet.config.equator_temperature_c - 8.0) / 40.0, 0.0, 1.0))
     sea_setting = float(np.clip((planet.config.sea_level - 0.34) / 0.34, 0.0, 1.0))
 
-    accretion_heat = np.clip(0.28 + 0.42 * elevation + 0.35 * wave + 0.25 * volcanic_setting, 0.0, 1.0)
-    accretion = _three_color_gradient(accretion_heat, (4, 6, 12), (72, 28, 26), (240, 170, 78)).astype(np.float32)
+    # 1) Deep void + magical accretion cloud. The core narrows as p advances.
+    collapse = _smoothstep(0.04, 0.30, p)
+    cloud_radius = 1.18 - 0.70 * collapse
+    cloud = np.exp(-(radius ** 2) / max(0.06, cloud_radius ** 2))
+    filaments = np.clip(0.50 * cloud + 0.32 * cloud * spiral + 0.22 * fine * cloud, 0.0, 1.0)
+    star_sparkles = (fine > 0.985).astype(np.float32) * (1.0 - 0.55 * collapse)
+    void_rgb = np.zeros((h, w, 3), dtype=np.float32)
+    void_rgb[:, :] = np.array((2, 3, 9), dtype=np.float32)
+    nebula_color = np.array((96, 72, 190), dtype=np.float32) * (1.0 - collapse) + np.array((255, 154, 74), dtype=np.float32) * collapse
+    core_color = np.array((255, 220, 150), dtype=np.float32)
+    void_rgb += filaments[..., None] * nebula_color * (0.35 + 0.75 * collapse)
+    void_rgb += np.clip(cloud * collapse * 1.4, 0.0, 1.0)[..., None] * core_color * 0.38
+    void_rgb += star_sparkles[..., None] * np.array((190, 210, 255), dtype=np.float32)
 
-    magma_heat = np.clip(0.45 + 0.28 * elevation + 0.46 * volcanism + 0.14 * heat_setting + 0.12 * wave, 0.0, 1.0)
-    magma = _three_color_gradient(magma_heat, (38, 12, 8), (170, 52, 20), (255, 205, 92)).astype(np.float32)
-    crust_mask = np.clip(_smoothstep(0.18, 0.54, p) * (elevation - 0.54) * 2.8, 0.0, 1.0)[..., None]
-    crust_color = np.array((64, 49, 42), dtype=np.float32)
-    magma = magma * (1.0 - crust_mask * 0.72) + crust_color * (crust_mask * 0.72)
+    # 2) Magma / volcanic phase. Final elevation and volcanism steer where fire
+    # and hardening crust become visible.
+    magma_heat = np.clip(
+        0.46 + 0.30 * elevation + 0.56 * volcanism + 0.18 * heat_setting + 0.16 * wave,
+        0.0,
+        1.0,
+    )
+    magma = _three_color_gradient(magma_heat, (32, 6, 5), (190, 45, 18), (255, 218, 96)).astype(np.float32)
+    crack_pattern = np.clip((volcanism * 1.7 + wave * 0.45 + fine * 0.22) - 0.62, 0.0, 1.0)
+    magma += crack_pattern[..., None] * np.array((255, 170, 42), dtype=np.float32) * (0.55 + 0.45 * volcanic_setting)
+    crust_mask = np.clip((elevation - (0.62 - 0.08 * _smoothstep(0.32, 0.56, p))) * 3.0, 0.0, 1.0)[..., None]
+    magma = magma * (1.0 - crust_mask * 0.62) + np.array((58, 48, 44), dtype=np.float32) * (crust_mask * 0.62)
 
-    ocean_birth = np.clip(water * (0.30 + 0.70 * _smoothstep(0.34, 0.62, p + 0.06 * sea_setting)), 0.0, 1.0)
-    storm_land = _three_color_gradient(elevation, (58, 52, 50), (100, 92, 78), (178, 174, 154)).astype(np.float32)
-    storm_water = _gradient(ocean_birth, (44, 54, 66), (50, 108, 160)).astype(np.float32)
-    storm = storm_land * (1.0 - ocean_birth[..., None]) + storm_water * ocean_birth[..., None]
-    rain = (0.5 + 0.5 * np.sin((xx * 40.0 + yy * 86.0 + p * 60.0) * np.pi)).astype(np.float32)
-    storm += rain[..., None] * np.array((14, 18, 24), dtype=np.float32) * 0.28
-    storm = np.clip(storm, 0, 255)
+    # 3) Smoke / ash / cloud deck, visually tied to volcanism and water setting.
+    smoke_noise = np.clip(0.42 * wave + 0.40 * spiral + 0.28 * fine + 0.38 * volcanism, 0.0, 1.0)
+    smoke_alpha = np.clip((smoke_noise - 0.28) * (1.00 + 0.55 * volcanic_setting), 0.0, 0.86)
+    smoke_color = np.array((72, 70, 82), dtype=np.float32)
+    smoky = magma * (1.0 - smoke_alpha[..., None]) + smoke_color * smoke_alpha[..., None]
+    cloud_alpha = np.clip((0.55 * wave + 0.55 * fine + 0.25 * water + 0.22 * sea_setting) - 0.38, 0.0, 0.82)
+    cloud_color = np.array((184, 192, 202), dtype=np.float32)
+    cloudy = smoky * (1.0 - cloud_alpha[..., None] * 0.72) + cloud_color * (cloud_alpha[..., None] * 0.72)
 
+    # 4) Rain / condensation: dark curtains and diagonal streaks over a muted
+    # crust, with oceans slowly filling low places.
+    ocean_birth = np.clip(water * (0.08 + 0.92 * _smoothstep(0.58, 0.82, p + 0.04 * sea_setting)), 0.0, 1.0)
+    muted_land = _three_color_gradient(elevation, (52, 46, 43), (110, 98, 76), (184, 178, 152)).astype(np.float32)
+    muted_water = _gradient(ocean_birth, (30, 42, 58), (42, 115, 178)).astype(np.float32)
+    rain_world = muted_land * (1.0 - ocean_birth[..., None]) + muted_water * ocean_birth[..., None]
+    rain_lines = (0.5 + 0.5 * np.sin((xx * 38.0 + yy * 108.0 + p * 130.0) * np.pi)).astype(np.float32)
+    rain_mask = np.clip((rain_lines - 0.78) * 4.2, 0.0, 1.0) * (0.35 + 0.65 * sea_setting)
+    rain_world = rain_world * (1.0 - rain_mask[..., None] * 0.35) + np.array((170, 190, 215), dtype=np.float32) * rain_mask[..., None] * 0.42
+    rain_world = rain_world * 0.84 + np.array((18, 24, 34), dtype=np.float32) * 0.16
+
+    # 5) Young planet reveal with residual volcanic glow and fading cloud bands.
     young = final_biome.copy()
-    hot_spots = np.clip(volcanism * (0.55 + 0.55 * volcanic_setting), 0.0, 1.0)[..., None]
-    young = young * (1.0 - hot_spots * 0.38) + np.array((255, 118, 46), dtype=np.float32) * (hot_spots * 0.38)
-    young = young * 0.88 + np.array((26, 30, 34), dtype=np.float32) * 0.12
+    hot_spots = np.clip(volcanism * (0.55 + 0.62 * volcanic_setting), 0.0, 1.0)[..., None]
+    young = young * (1.0 - hot_spots * 0.32) + np.array((255, 112, 44), dtype=np.float32) * (hot_spots * 0.32)
+    residual_cloud = np.clip((cloud_alpha - 0.18) * (1.0 - _smoothstep(0.78, 1.0, p)), 0.0, 0.62)
+    young = young * (1.0 - residual_cloud[..., None] * 0.36) + np.array((210, 216, 222), dtype=np.float32) * (residual_cloud[..., None] * 0.36)
 
-    if p < 0.22:
-        t = _smoothstep(0.00, 0.22, p)
-        rgb = accretion * (1.0 - t) + magma * t
-    elif p < 0.52:
-        t = _smoothstep(0.22, 0.52, p)
-        rgb = magma * (1.0 - t) + storm * t
-    elif p < 0.80:
-        t = _smoothstep(0.52, 0.80, p)
-        rgb = storm * (1.0 - t) + young * t
+    if p < 0.08:
+        # Full black fade-in into space.
+        t = _smoothstep(0.00, 0.08, p)
+        rgb = void_rgb * t
+    elif p < 0.30:
+        rgb = void_rgb
+    elif p < 0.48:
+        t = _smoothstep(0.30, 0.48, p)
+        rgb = void_rgb * (1.0 - t) + magma * t
+    elif p < 0.62:
+        t = _smoothstep(0.48, 0.62, p)
+        rgb = magma * (1.0 - t) + cloudy * t
+    elif p < 0.76:
+        t = _smoothstep(0.62, 0.76, p)
+        rgb = cloudy * (1.0 - t) + rain_world * t
+    elif p < 0.90:
+        t = _smoothstep(0.76, 0.90, p)
+        rgb = rain_world * (1.0 - t) + young * t
     else:
-        t = _smoothstep(0.80, 1.00, p)
+        t = _smoothstep(0.90, 1.00, p)
         rgb = young * (1.0 - t) + final_biome * t
 
-    # Subtle dark atmosphere at the beginning, fading as the surface stabilizes.
-    darkness = 0.34 * (1.0 - _smoothstep(0.04, 0.74, p))
-    rgb *= 1.0 - darkness
+    # A cinematic vignette keeps early phases cosmic and focuses the collapse.
+    vignette = np.clip(1.0 - 0.48 * radius * (1.0 - _smoothstep(0.72, 1.0, p)), 0.54, 1.0)
+    rgb *= vignette[..., None]
     return np.clip(rgb, 0, 255).astype(np.uint8)
 
-def render_layer(planet: Planet, layer: LayerName, overlay_mode: OverlayMode = "off") -> np.ndarray:
+
+
+def render_globe_texture(texture_rgb: np.ndarray, target_size: tuple[int, int], *, rotation: float = 0.0) -> np.ndarray:
+    """Project an equirectangular layer texture onto a rotating orthographic globe."""
+    target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    tex_h, tex_w = texture_rgb.shape[:2]
+    out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    out[:, :] = np.array((8, 10, 18), dtype=np.uint8)
+
+    radius = max(2.0, min(target_w, target_h) * 0.46)
+    cx = (target_w - 1) / 2.0
+    cy = (target_h - 1) / 2.0
+    yy, xx = np.indices((target_h, target_w), dtype=np.float32)
+    nx = (xx - cx) / radius
+    ny = (yy - cy) / radius
+    r2 = nx * nx + ny * ny
+    mask = r2 <= 1.0
+    if not np.any(mask):
+        return out
+
+    nz = np.sqrt(np.clip(1.0 - r2, 0.0, 1.0))
+    lon = np.arctan2(nx, nz) + float(rotation)
+    lat = np.arcsin(np.clip(-ny, -1.0, 1.0))
+    u = (lon / (2.0 * np.pi)) % 1.0
+    v = np.clip(0.5 - lat / np.pi, 0.0, 0.999999)
+    src_x = np.clip((u * tex_w).astype(np.int32), 0, tex_w - 1)
+    src_y = np.clip((v * tex_h).astype(np.int32), 0, tex_h - 1)
+
+    sampled = texture_rgb[src_y, src_x].astype(np.float32)
+    light = np.clip(0.38 + 0.62 * (0.72 * nz + 0.20 * nx - 0.10 * ny), 0.20, 1.08)
+    limb = np.clip((1.0 - r2) * 7.0, 0.0, 1.0)
+    shaded = sampled * light[..., None]
+    shaded = shaded * (0.78 + 0.22 * limb[..., None])
+    out[mask] = np.clip(shaded[mask], 0, 255).astype(np.uint8)
+
+    # Soft atmospheric rim around the visible disk.
+    rim = (r2 > 0.965) & (r2 <= 1.04)
+    if np.any(rim):
+        rim_alpha = np.clip((1.04 - r2[rim]) / 0.075, 0.0, 1.0)[:, None]
+        rim_color = np.array((72, 104, 155), dtype=np.float32)
+        current = out[rim].astype(np.float32)
+        out[rim] = np.clip(current * (1.0 - 0.45 * rim_alpha) + rim_color * (0.45 * rim_alpha), 0, 255).astype(np.uint8)
+    return out
+
+
+def render_globe_scalar_overlay(
+    field: np.ndarray,
+    color: Color,
+    target_size: tuple[int, int],
+    *,
+    rotation: float = 0.0,
+) -> pygame.Surface:
+    """Project one scalar field to a transparent globe overlay surface."""
+    target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    h, w = field.shape
+    rgba = np.zeros((target_h, target_w, 4), dtype=np.uint8)
+
+    radius = max(2.0, min(target_w, target_h) * 0.46)
+    cx = (target_w - 1) / 2.0
+    cy = (target_h - 1) / 2.0
+    yy, xx = np.indices((target_h, target_w), dtype=np.float32)
+    nx = (xx - cx) / radius
+    ny = (yy - cy) / radius
+    r2 = nx * nx + ny * ny
+    mask = r2 <= 1.0
+    if np.any(mask):
+        nz = np.sqrt(np.clip(1.0 - r2, 0.0, 1.0))
+        lon = np.arctan2(nx, nz) + float(rotation)
+        lat = np.arcsin(np.clip(-ny, -1.0, 1.0))
+        u = (lon / (2.0 * np.pi)) % 1.0
+        v = np.clip(0.5 - lat / np.pi, 0.0, 0.999999)
+        src_x = np.clip((u * w).astype(np.int32), 0, w - 1)
+        src_y = np.clip((v * h).astype(np.int32), 0, h - 1)
+        sampled = np.clip(field[src_y, src_x], 0.0, 1.0)
+        alpha = np.clip(34 + 198 * np.sqrt(sampled / max(float(field.max()), 0.025)), 0, 226).astype(np.uint8)
+        alpha[sampled <= 0.004] = 0
+        rgba[..., :3] = np.array(color, dtype=np.uint8)
+        rgba[..., 3] = np.where(mask, alpha, 0).astype(np.uint8)
+
+    surface = pygame.Surface((target_w, target_h), pygame.SRCALPHA)
+    pixels = pygame.surfarray.pixels3d(surface)
+    pixels[:] = np.transpose(rgba[..., :3], (1, 0, 2))
+    del pixels
+    pixels_alpha = pygame.surfarray.pixels_alpha(surface)
+    pixels_alpha[:] = np.transpose(rgba[..., 3], (1, 0))
+    del pixels_alpha
+    return surface
+
+def render_layer(
+    planet: Planet,
+    layer: LayerName,
+    overlay_mode: OverlayMode = "off",
+    weather_overlay_mode: WeatherOverlayMode = "off",
+) -> np.ndarray:
     base = _render_base_layer(planet, layer)
+    if should_apply_weather_overlay(layer, weather_overlay_mode):
+        base = apply_weather_overlay(planet, base, weather_overlay_mode)
     if should_apply_life_overlay(layer, overlay_mode):
         return apply_life_overlay(planet, base, overlay_mode)
     return base
 
 
 def should_apply_life_overlay(layer: LayerName, overlay_mode: OverlayMode) -> bool:
-    return overlay_mode != "off" and layer not in LIFE_LAYER_NAMES
+    return overlay_mode != "off" and layer not in LIFE_LAYER_NAMES and layer not in ATMOSPHERE_LAYER_NAMES
+
+
+def should_apply_weather_overlay(layer: LayerName, weather_overlay_mode: WeatherOverlayMode) -> bool:
+    return weather_overlay_mode != "off" and layer == "biome"
 
 
 def apply_life_overlay(planet: Planet, base_rgb: np.ndarray, overlay_mode: OverlayMode) -> np.ndarray:
@@ -1659,6 +2132,59 @@ def apply_life_overlay(planet: Planet, base_rgb: np.ndarray, overlay_mode: Overl
     return base_rgb
 
 
+def apply_weather_overlay(planet: Planet, base_rgb: np.ndarray, weather_overlay_mode: WeatherOverlayMode) -> np.ndarray:
+    """Blend visual-only clouds/rain on top of the biome map.
+
+    Weather remains a consequence/visualization of existing fields; it does not
+    feed back into humidity, nutrients or fertility yet.
+    """
+    if weather_overlay_mode == "off":
+        return base_rgb
+
+    cloud_alpha, rain_alpha, lightning, cloud_rgb = _atmosphere_visual_fields(planet)
+    rgb = base_rgb.astype(np.float32).copy()
+    land_boost = np.where(planet.land, 1.18, 0.88).astype(np.float32)
+
+    def blend_clouds(current: np.ndarray, *, strength: float) -> np.ndarray:
+        shaped = np.power(np.clip(cloud_alpha, 0.0, 1.0), 1.35)
+        alpha = np.clip((0.015 + strength * shaped) * land_boost, 0.0, strength + 0.05)[..., None]
+        mixed = current * (1.0 - alpha) + cloud_rgb * alpha
+        # Keep clouds patchy: clear cells stay clear instead of applying a full-map filter.
+        shadow = np.clip(shaped * 0.045 * land_boost, 0.0, 0.075)[..., None]
+        return mixed * (1.0 - shadow)
+
+    def blend_rain(current: np.ndarray, *, strength: float) -> np.ndarray:
+        h, w = planet.shape
+        yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+        xx = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+        tick = float(planet.tick)
+        streaks = 0.5 + 0.5 * np.sin((xx * 62.0 + yy * 150.0 + tick * 0.37) * np.pi)
+        streaks2 = 0.5 + 0.5 * np.sin((xx * 27.0 + yy * 96.0 + tick * 0.19) * np.pi)
+        streak_mask = np.clip((0.72 * streaks + 0.28 * streaks2 - 0.72) * 5.0, 0.0, 1.0)
+        visible_rain = np.clip(rain_alpha * (0.25 + 0.75 * streak_mask) * land_boost, 0.0, 1.0)
+        rain_color = np.array((188, 211, 236), dtype=np.float32)
+        mixed = current * (1.0 - visible_rain[..., None] * strength) + rain_color * (visible_rain[..., None] * strength)
+        mixed *= 1.0 - np.clip(rain_alpha * 0.055 * land_boost, 0.0, 0.09)[..., None]
+        if float(lightning.max()) > 0.0:
+            flash = np.clip(lightning[..., None] * 0.58, 0.0, 0.58)
+            mixed = mixed * (1.0 - flash) + np.array((235, 244, 255), dtype=np.float32) * flash
+        return mixed
+
+    if weather_overlay_mode == "clouds":
+        return np.clip(blend_clouds(rgb, strength=0.30), 0, 255).astype(np.uint8)
+
+    if weather_overlay_mode == "rain":
+        rgb = blend_clouds(rgb, strength=0.14)
+        rgb = blend_rain(rgb, strength=0.40)
+        return np.clip(rgb, 0, 255).astype(np.uint8)
+
+    if weather_overlay_mode == "all":
+        rgb = blend_clouds(rgb, strength=0.24)
+        rgb = blend_rain(rgb, strength=0.34)
+        return np.clip(rgb, 0, 255).astype(np.uint8)
+
+    return base_rgb
+
 def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
     if layer == "biome":
         return _render_biome(planet)
@@ -1673,6 +2199,10 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
         return _gradient(planet.humidity, (120, 95, 45), (45, 165, 95))
     if layer == "light":
         return _gradient(planet.light, (20, 18, 45), (255, 235, 140))
+    if layer == "clouds":
+        return _render_clouds(planet)
+    if layer == "rain":
+        return _render_rain(planet)
     if layer == "volcanism":
         return _three_color_gradient(planet.volcanism, (18, 16, 24), (92, 46, 72), (255, 116, 45))
     if layer == "minerals":
@@ -1696,6 +2226,133 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
     if layer == "biotic_pressure":
         return _render_biotic_pressure(planet)
     raise ValueError(f"Unknown layer: {layer}")
+
+
+def _atmosphere_visual_fields(planet: Planet) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return procedural cloud, rain, lightning and cloud-color fields.
+
+    This is visual-only weather. It is deterministic from the current tick,
+    planet fields and setup values, so it drifts while the simulation runs but
+    never changes ecology/resource dynamics.
+    """
+    h, w = planet.shape
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
+    tick = float(planet.tick)
+    period = float(max(10, planet.config.seasonal_period_ticks))
+    phase = 2.0 * np.pi * ((tick % period) / period)
+
+    # Smooth moving bands. A few sine fields are cheaper than storing a full
+    # weather simulation and still read well as slow atmospheric drift.
+    drift = tick / period
+    band_a = 0.5 + 0.5 * np.sin((xx * 7.0 + yy * 2.1 + drift * 2.6) * np.pi)
+    band_b = 0.5 + 0.5 * np.sin((xx * -4.4 + yy * 8.0 + drift * -1.7) * np.pi)
+    fine = 0.5 + 0.5 * np.sin((xx * 37.0 + yy * 19.0 + drift * 10.5) * np.pi)
+    swirl = 0.5 + 0.5 * np.sin((xx * 11.0 - yy * 5.0 + 0.85 * np.sin(phase)) * np.pi)
+    pattern = np.clip(0.38 * band_a + 0.28 * band_b + 0.22 * swirl + 0.12 * fine, 0.0, 1.0)
+
+    water_access = np.where(planet.land, planet.humidity, 0.56 + 0.44 * planet.water).astype(np.float32)
+    warmth = np.clip((planet.temperature_c + 12.0) / 46.0, 0.0, 1.0).astype(np.float32)
+    seasonal_moisture = (0.5 + 0.5 * np.sin(phase - yy * np.pi)).astype(np.float32)
+    # Slow storm envelope: rain belts wax/wane instead of staying uniformly
+    # active. The spatial term keeps different regions out of phase.
+    storm_cycle = 0.5 + 0.5 * np.sin((phase * 1.55) + xx * 3.4 - yy * 2.2 + tick * 0.0021)
+    storm_cycle = (0.30 + 0.70 * storm_cycle).astype(np.float32)
+    sea_setting = float(np.clip((planet.config.sea_level - 0.34) / 0.34, 0.0, 1.0))
+    volcanic_setting = float(np.clip(planet.config.volcanic_activity_fraction / 0.24, 0.0, 1.0))
+
+    source = (
+        0.42 * water_access
+        + 0.20 * planet.humidity
+        + 0.13 * planet.water
+        + 0.11 * seasonal_moisture
+        + 0.10 * planet.fertility
+        + 0.08 * sea_setting
+        + 0.06 * planet.volcanism * volcanic_setting
+        + 0.07 * planet.land.astype(np.float32) * planet.humidity
+    )
+    raw_clouds = source + 0.52 * (pattern - 0.50)
+    # Keep clouds patchy enough to read as clouds, not as a full-map filter.
+    cloud_alpha = np.clip((raw_clouds - 0.43) * 2.65, 0.0, 1.0).astype(np.float32)
+    cloud_alpha = np.power(cloud_alpha, 1.18).astype(np.float32)
+    cloud_alpha = _soften_visual_field(cloud_alpha, passes=1)
+
+    storm_potential = cloud_alpha * (0.42 + 0.58 * water_access) * (0.30 + 0.70 * warmth)
+    rain_alpha = np.clip((storm_potential - 0.28) * 2.55, 0.0, 1.0).astype(np.float32)
+    rain_alpha *= (0.48 + 0.52 * sea_setting) * storm_cycle
+    rain_alpha = _soften_visual_field(rain_alpha, passes=1)
+
+    # Deterministic sparse storm flashes. They appear only when rain and
+    # volcanism/storm potential are high enough, and change with tick.
+    flash_wave = 0.5 + 0.5 * np.sin((xx * 91.0 + yy * 47.0 + tick * 0.137) * np.pi)
+    storm_core = np.clip(rain_alpha * (0.35 + 0.65 * planet.volcanism), 0.0, 1.0)
+    lightning = np.where((flash_wave > 0.992) & (storm_core > 0.28), storm_core, 0.0).astype(np.float32)
+    lightning = _soften_visual_field(lightning, passes=1)
+
+    coldness = np.clip((8.0 - planet.temperature_c) / 34.0, 0.0, 1.0)[..., None]
+    heat = np.clip((planet.temperature_c - 18.0) / 36.0, 0.0, 1.0)[..., None]
+    smoky = np.clip(planet.volcanism * (0.35 + 0.65 * volcanic_setting), 0.0, 1.0)[..., None]
+    base = np.array((182, 190, 202), dtype=np.float32)
+    cold_color = np.array((214, 226, 238), dtype=np.float32)
+    warm_color = np.array((205, 182, 160), dtype=np.float32)
+    smoke_color = np.array((116, 105, 116), dtype=np.float32)
+    cloud_rgb = base * (1.0 - 0.34 * coldness) + cold_color * (0.34 * coldness)
+    cloud_rgb = cloud_rgb * (1.0 - 0.22 * heat) + warm_color * (0.22 * heat)
+    cloud_rgb = cloud_rgb * (1.0 - 0.42 * smoky) + smoke_color * (0.42 * smoky)
+    return cloud_alpha, rain_alpha.astype(np.float32), lightning, cloud_rgb.astype(np.float32)
+
+
+def _soften_visual_field(field: np.ndarray, *, passes: int = 1) -> np.ndarray:
+    result = field.astype(np.float32)
+    for _ in range(max(0, passes)):
+        result = (
+            result * 0.52
+            + 0.12 * np.roll(result, 1, axis=0)
+            + 0.12 * np.roll(result, -1, axis=0)
+            + 0.12 * np.roll(result, 1, axis=1)
+            + 0.12 * np.roll(result, -1, axis=1)
+        )
+    return np.clip(result, 0.0, 1.0).astype(np.float32)
+
+
+def _render_clouds(planet: Planet) -> np.ndarray:
+    cloud_alpha, _rain_alpha, _lightning, cloud_rgb = _atmosphere_visual_fields(planet)
+    biome = _render_biome(planet).astype(np.float32)
+    sky_tint = np.array((14, 19, 30), dtype=np.float32)
+    base = biome * 0.58 + sky_tint * 0.42
+    land_boost = np.where(planet.land, 1.25, 1.0).astype(np.float32)
+    alpha = np.clip((0.12 + 0.78 * cloud_alpha) * land_boost, 0.0, 0.86)[..., None]
+    rgb = base * (1.0 - alpha) + cloud_rgb * alpha
+    # Clear areas remain visibly planetary instead of black.
+    rgb = rgb * (0.82 + 0.18 * cloud_alpha[..., None])
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+def _render_rain(planet: Planet) -> np.ndarray:
+    cloud_alpha, rain_alpha, lightning, cloud_rgb = _atmosphere_visual_fields(planet)
+    biome = _render_biome(planet).astype(np.float32)
+    storm_base = biome * 0.44 + np.array((9, 14, 25), dtype=np.float32) * 0.56
+    cloud_mix = np.clip(0.08 + 0.55 * cloud_alpha, 0.0, 0.62)[..., None]
+    rgb = storm_base * (1.0 - cloud_mix) + cloud_rgb * cloud_mix
+
+    h, w = planet.shape
+    yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+    tick = float(planet.tick)
+    # Diagonal curtains, stylized rather than physical.
+    streaks = 0.5 + 0.5 * np.sin((xx * 58.0 + yy * 142.0 + tick * 0.34) * np.pi)
+    streaks2 = 0.5 + 0.5 * np.sin((xx * 24.0 + yy * 88.0 + tick * 0.21) * np.pi)
+    streak_mask = np.clip((0.72 * streaks + 0.28 * streaks2 - 0.73) * 4.7, 0.0, 1.0)
+    land_boost = np.where(planet.land, 1.35, 1.0).astype(np.float32)
+    visible_rain = np.clip(rain_alpha * (0.32 + 0.68 * streak_mask) * land_boost, 0.0, 1.0)
+    rain_color = np.array((170, 195, 226), dtype=np.float32)
+    rgb = rgb * (1.0 - visible_rain[..., None] * 0.46) + rain_color * (visible_rain[..., None] * 0.46)
+    rgb *= (1.0 - rain_alpha[..., None] * 0.18)
+
+    if float(lightning.max()) > 0.0:
+        flash = np.clip(lightning[..., None] * 0.92, 0.0, 0.92)
+        rgb = rgb * (1.0 - flash) + np.array((235, 244, 255), dtype=np.float32) * flash
+    return np.clip(rgb, 0, 255).astype(np.uint8)
 
 
 def _render_biotic_pressure(planet: Planet) -> np.ndarray:
@@ -1805,7 +2462,7 @@ def random_seed() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 4")
+    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 5")
     parser.add_argument(
         "--seed",
         type=int,

@@ -13,6 +13,7 @@ Le viewer démarre maintenant sur un écran de préparation avant de lancer la s
 
 ```text
 - bouton Window / Fullscreen
+- bouton View: 2D/3D
 - seed utilisée
 - statistiques résultantes de la planète générée
 - paramètres modifiables de génération
@@ -40,7 +41,7 @@ Les deux paramètres de détail restent regroupés en bas : ils changent la text
 
 Quand la planète te plaît, clique `Start simulation` ou appuie sur `Enter` / `Space`.
 
-Par défaut, `Skip formation intro` est décoché : `Start simulation` joue une intro géologique déterministe, plus lente et purement visuelle. Elle raconte la transition accrétion / magma ocean / pluies intenses / refroidissement / planète jeune stable. Cette intro ne modifie pas la planète générée, elle prépare simplement le départ de la simulation. Coche `Skip formation intro` quand tu veux tester vite. Pendant l'intro, `Enter` / `Space` passe directement à la simulation.
+Par défaut, `Skip formation intro` est décoché : `Start simulation` joue une intro géologique déterministe, plus lente et purement visuelle. Elle raconte un fondu depuis le vide spatial, l'effondrement d'un nuage lumineux, une phase volcanique explosive, fumées/nuages primordiaux, pluies de condensation, puis révélation progressive des océans et continents. Cette intro ne modifie pas la planète générée, elle prépare simplement le départ de la simulation. Coche `Skip formation intro` quand tu veux tester vite. Pendant l'intro, `Enter` / `Space` passe directement à la simulation.
 
 Raccourcis utiles pendant le setup :
 
@@ -48,6 +49,7 @@ Raccourcis utiles pendant le setup :
 Enter/Space   lancer la simulation ou skipper l’intro
 r             seed aléatoire
 f/F11         plein écran / fenêtre
+g             bascule rendu carte 2D / planète 3D
 s             screenshot
 q/esc         quitter
 ```
@@ -85,12 +87,23 @@ tab    couche suivante
 ↑/↓    vitesse de tick
 +/-    vitesse de tick aussi
 bouton Fullscreen/Window dans le panneau de droite
+bouton View: 2D/3D dans le panneau de droite
 bouton Life: off/biomass/dominant dans le panneau de droite
+bouton Weather: off/clouds/rain/all dans le panneau de droite
+g      bascule rendu carte 2D / planète 3D
 o      cycle aussi le life overlay
+w      cycle aussi le weather overlay
 r      nouvelle planète, seed aléatoire
 s      capture d’écran
 q/esc  quitter
 ```
+
+
+## Rendu 2D / 3D
+
+`View: 2D` conserve la carte équirectangulaire classique, pratique pour lire les couches.
+
+`View: 3D` projette la même couche sur une planète en rotation lente. Ce n'est pas un moteur 3D physique : c'est un rendu orthographique logiciel de la texture 2D actuelle. Le clic d'inspection fonctionne aussi sur le disque visible de la planète ; les zones cachées au dos ne sont simplement pas cliquables.
 
 ## Couches affichables
 
@@ -101,6 +114,8 @@ water            eau de surface / profondeur océanique
 humidity         humidité écologique, moins redondante avec water
 light            lumière dynamique selon latitude + saison
 temperature      température dynamique latitude + altitude + saison + océan
+clouds           voile nuageux procédural, dérive lente, couleur selon climat/volcanisme
+rain             pluie stylisée + rares flashes d'orage sur zones humides/volcaniques
 volcanism        volcanisme de base + impulsions temporaires
 minerals         ressources minérales statiques
 nutrients        nutriments dynamiques, surtout côtes/basses terres/érosion
@@ -114,7 +129,7 @@ dominant_life    couleur de la lignée dominante + densité de biomasse
 biotic_pressure  pression locale de consommation de biomasse vivante
 ```
 
-## Life overlay
+## Overlays
 
 Le viewer affiche un overlay de vie sur les couches non-vivantes, activé par défaut en mode `biomass`.
 
@@ -125,6 +140,17 @@ Life: off       carte brute sans overlay
 ```
 
 L'overlay ne remplace pas les couches `biomass`, `diversity` ou `dominant_life` : il sert seulement à voir la biosphère directement sur la carte jolie/abiotique.
+
+Le bouton météo ajoute maintenant une atmosphère directement sur la couche `biome` :
+
+```text
+Weather: clouds  ajoute un voile nuageux plus patchy sur le biome
+Weather: rain    ajoute nuages bas + pluie stylisée + rares flashes
+Weather: all     combine nuages + pluie légère/storms
+Weather: off     carte biome brute sans atmosphère
+```
+
+La météo reste visuelle : elle est conséquence des champs existants, pas une cause écologique. Elle varie avec le tick et la saison pour éviter une pluie figée en permanence. Les années sont maintenant de durée seed-dérivée par défaut, donc toutes les planètes ne tournent pas sur le même calendrier de 2400 ticks.
 
 ## Logique Phase 5
 
@@ -178,10 +204,25 @@ dominant_life   quelle lignée domine localement
 diversity       où plusieurs lignées coexistent
 dead_matter     traces d'effondrement/recyclage
 biotic_pressure  zones où la vie exerce une pression sur la vie
+clouds/rain     couches atmosphériques dédiées + overlay météo sur biome
 nutrients       ressources consommées puis recyclées
 ```
 
 La couche `dead_matter` peut rester sombre au tout début. En Phase 5 elle devient plus visible après les premiers crashs, extinctions locales ou zones de surpopulation. L'affichage est auto-scalé : une petite quantité de débris peut devenir visible même si la valeur brute reste faible.
+
+
+## Atmosphere visual layers
+
+Deux couches visuelles ont été ajoutées à la carte de simulation, hors intro :
+
+```text
+clouds  voile nuageux procédural ; opacité variable ; dérive lente avec le tick
+rain    pluie stylisée ; intensité liée à humidité/eau/température ; flashes rares près des zones humides/volcaniques
+```
+
+Ces couches sont volontairement **visuelles seulement** pour l'instant. Elles ne modifient pas encore les ressources, l'humidité ou la fertilité. Elles servent à rendre l'atmosphère observable avant d'en faire éventuellement un vrai système météo plus tard. Le life overlay est désactivé sur ces deux couches pour garder la lecture atmosphérique propre.
+
+La couche `biome` peut maintenant recevoir un overlay `Weather: clouds` ou `Weather: rain`. Les précipitations dérivent avec le temps, les saisons et des cycles de tempête procéduraux ; elles ne restent donc pas strictement identiques d'un tick à l'autre. Le panneau affiche aussi `year/day`, une indication de saison et la moyenne cloud/rain pour aider à comprendre le cycle en cours.
 
 ## Tests
 
@@ -208,7 +249,8 @@ Les tests vérifient notamment :
 - traits Phase 5 `living_consumption`, `defense`, `storage` ;
 - couche `biotic_pressure` visible lorsque la vie interagit avec la vie ;
 - évolution déterministe à seed et steps identiques ;
-- rendu d'intro géologique déterministe et sans effet sur la simulation.
+- rendu d'intro géologique déterministe et sans effet sur la simulation ;
+- overlays météo sur biome, dérive temporelle et labels de saison pour l'observateur.
 
 ## Notes Linux / Mesa / GLX
 
@@ -337,3 +379,20 @@ Small final Phase 4 polish before moving to richer ecology:
 The setup screen now treats the geological prelude as the default experience: `Skip formation intro` starts unchecked. The intro is slower and more contemplative, so the cloud/accretion, primordial fire, rain/condensation and young-planet stages have time to read visually.
 
 The right panel section headers are more separated and visually anchored, and the runtime layer legend can now be collapsed like the other sections.
+
+
+## Phase 5 observer polish / intro v2
+
+Small observer polish before continuing ecology work:
+
+```text
+- Simulation and Life summary sections start collapsed by default
+- Event log has an `Open event summary` button and modal
+- event summary modal shows counts plus recent major world events
+- selected extinct lineages remain selected instead of visually disappearing
+- extinct lineages are shown in crimson in cards, rows and genealogy trees
+- the selected map label stays visible even when the selected lineage has no remaining population
+- geological intro v2 adds black fade, stellar cloud collapse, explosive volcanism, smoke/cloud layer, rain and slower ocean/continent reveal
+```
+
+This patch remains visual/observer-only: it does not change simulation balance or generated planet fields.

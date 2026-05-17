@@ -96,6 +96,7 @@ class Planet:
 
     @classmethod
     def generate(cls, config: PlanetConfig) -> "Planet":
+        config = _resolve_generated_config(config)
         config.validate()
         rng = np.random.default_rng(config.seed)
 
@@ -927,6 +928,20 @@ def _infer_habitat_label(
         return "wet land"
     return "temperate land"
 
+
+
+def _resolve_generated_config(config: PlanetConfig) -> PlanetConfig:
+    """Resolve seed-derived settings that are intentionally random by default.
+
+    A seasonal period of 0 means: pick a deterministic year length from the
+    planet seed. Passing an explicit value still keeps tests/scenarios fully
+    reproducible.
+    """
+    if int(config.seasonal_period_ticks) != 0:
+        return config
+    rng = np.random.default_rng(int(config.seed) ^ 0x5EED_51A5)
+    year = int(rng.integers(1500, 3601))
+    return replace(config, seasonal_period_ticks=year)
 
 def _generate_elevation(config: PlanetConfig, rng: np.random.Generator) -> np.ndarray:
     terrain = fractal_noise_2d(

@@ -1,7 +1,7 @@
 import numpy as np
 
 from alife import Planet, PlanetConfig
-from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, geological_intro_stage, render_geological_intro_layer, render_layer, should_apply_life_overlay
+from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, geological_intro_stage, render_geological_intro_layer, render_globe_texture, render_layer, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -509,10 +509,12 @@ def test_major_events_are_logged_for_observer_panel():
 
 
 def test_geological_intro_stage_progression_is_ordered():
-    assert geological_intro_stage(0.0).title.startswith("Accretion")
-    assert geological_intro_stage(0.25).title == "Magma ocean"
-    assert geological_intro_stage(0.50).title.startswith("Heavy rain")
-    assert geological_intro_stage(0.70).title == "Cooling crust"
+    assert geological_intro_stage(0.0).title.startswith("Void")
+    assert geological_intro_stage(0.20).title == "Cloud collapse"
+    assert geological_intro_stage(0.40).title.startswith("Explosive volcanic")
+    assert geological_intro_stage(0.56).title.startswith("Smoke")
+    assert geological_intro_stage(0.70).title.startswith("Condensation")
+    assert geological_intro_stage(0.84).title.startswith("Oceans")
     assert geological_intro_stage(1.0).title == "Young stable planet"
 
 
@@ -632,3 +634,86 @@ def test_lineage_habitat_summary_includes_biotic_pressure():
     summary = planet.lineage_habitat_summary(species.id)
 
     assert 0.0 <= summary.mean_biotic_pressure <= 1.0
+
+def test_phase5_atmosphere_layers_render_and_drift():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=2728))
+
+    clouds_early = render_layer(planet, "clouds")
+    rain_early = render_layer(planet, "rain")
+    planet.step(420)
+    clouds_later = render_layer(planet, "clouds")
+    rain_later = render_layer(planet, "rain")
+
+    assert clouds_early.shape == rain_early.shape == (32, 64, 3)
+    assert clouds_early.dtype == np.uint8
+    assert rain_early.dtype == np.uint8
+    assert not should_apply_life_overlay("clouds", "biomass")
+    assert not should_apply_life_overlay("rain", "biomass")
+    assert not np.array_equal(clouds_early, clouds_later)
+    assert not np.array_equal(rain_early, rain_later)
+    assert float(clouds_early.std()) > 0.0
+    assert float(rain_early.std()) > 0.0
+
+
+
+def test_weather_overlay_applies_only_to_biome_and_changes_render():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=2829))
+
+    plain = render_layer(planet, "biome", overlay_mode="off", weather_overlay_mode="off")
+    cloudy = render_layer(planet, "biome", overlay_mode="off", weather_overlay_mode="clouds")
+    rainy = render_layer(planet, "biome", overlay_mode="off", weather_overlay_mode="rain")
+    clouds_layer = render_layer(planet, "clouds", weather_overlay_mode="rain")
+    clouds_plain = render_layer(planet, "clouds", weather_overlay_mode="off")
+
+    assert should_apply_weather_overlay("biome", "clouds")
+    assert not should_apply_weather_overlay("clouds", "rain")
+    assert not should_apply_weather_overlay("biomass", "rain")
+    assert plain.shape == cloudy.shape == rainy.shape == (32, 64, 3)
+    assert not np.array_equal(plain, cloudy)
+    assert not np.array_equal(plain, rainy)
+    np.testing.assert_array_equal(clouds_layer, clouds_plain)
+
+
+def test_weather_overlay_drifts_over_time_on_biome():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=2930))
+
+    first = render_layer(planet, "biome", weather_overlay_mode="rain")
+    planet.step(360)
+    later = render_layer(planet, "biome", weather_overlay_mode="rain")
+
+    assert not np.array_equal(first, later)
+
+
+def test_season_labels_and_positions_are_available_for_observer_ui():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=3031, seasonal_period_ticks=120))
+
+    assert season_position(planet) == (1, 1, 120)
+    assert season_label(planet)
+    planet.step(121)
+    assert season_position(planet) == (2, 2, 120)
+    assert season_label(planet)
+
+def test_default_year_length_is_seed_derived_and_reproducible():
+    a = Planet.generate(PlanetConfig(width=64, height=32, seed=4142))
+    b = Planet.generate(PlanetConfig(width=64, height=32, seed=4142))
+    c = Planet.generate(PlanetConfig(width=64, height=32, seed=4243))
+
+    assert 1500 <= a.config.seasonal_period_ticks <= 3600
+    assert a.config.seasonal_period_ticks == b.config.seasonal_period_ticks
+    assert a.config.seasonal_period_ticks != c.config.seasonal_period_ticks
+
+
+def test_weather_all_overlay_and_globe_projection_render():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=4344))
+
+    plain = render_layer(planet, "biome", weather_overlay_mode="off")
+    all_weather = render_layer(planet, "biome", weather_overlay_mode="all")
+    globe = render_globe_texture(all_weather, (160, 120), rotation=0.4)
+
+    assert should_apply_weather_overlay("biome", "all")
+    assert plain.shape == all_weather.shape == (32, 64, 3)
+    assert not np.array_equal(plain, all_weather)
+    assert globe.shape == (120, 160, 3)
+    assert globe.dtype == np.uint8
+    assert float(globe.std()) > 0.0
+
