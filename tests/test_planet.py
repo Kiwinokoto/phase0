@@ -5,7 +5,7 @@ import pygame
 
 from alife import Planet, PlanetConfig
 from alife.planet import SimulationEvent
-from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay, specimen_keywords
+from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, list_world_presets, load_world_preset, planet_config_from_preset, planet_config_to_preset, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, save_world_preset, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay, specimen_keywords
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -1204,3 +1204,107 @@ def test_phase7_body_plan_source_markers_are_visible_to_observer():
     assert "traits.size" in source
     assert "traits.armor" in source
     assert "traits.speed" in source
+
+
+def test_globe_renderer_rolls_texture_seam_to_hidden_side():
+    from alife.viewer import _roll_texture_seam_behind
+
+    texture = np.zeros((3, 12, 3), dtype=np.uint8)
+    texture[:, :6] = (255, 0, 0)
+    texture[:, 6:] = (0, 0, 255)
+
+    rolled = _roll_texture_seam_behind(texture, rotation=0.0)
+
+    assert rolled.shape == texture.shape
+    # With rotation=0, the original texture center is placed at the visible
+    # center of the globe; the hard rectangular cut stays at the hidden edge.
+    np.testing.assert_array_equal(rolled[:, 6], texture[:, 0])
+
+
+def test_phase6_final_polish_source_markers_are_kept_in_phase7():
+    source = inspect.getsource(PlanetViewer._draw_event_log) + inspect.getsource(PlanetViewer._draw_selected_lineage) + inspect.getsource(render_globe_texture)
+
+    assert "Event log ·" in source
+    assert "★ DESC" in source
+    assert "range:" in source
+    assert "_roll_texture_seam_behind" in source
+    assert "selected:" not in source
+
+
+def test_simple_world_preset_round_trips_seed_and_setup(tmp_path):
+    config = PlanetConfig(
+        width=80,
+        height=40,
+        seed=9192,
+        sea_level=0.57,
+        continent_scale=7,
+        detail_octaves=4,
+        detail_gain=0.61,
+        volcanic_activity_fraction=0.11,
+        equator_temperature_c=35.0,
+        pole_temperature_c=-22.0,
+    )
+    preset = planet_config_to_preset(config)
+    restored = planet_config_from_preset(preset)
+
+    assert restored.seed == config.seed
+    assert restored.width == config.width
+    assert restored.height == config.height
+    assert restored.sea_level == config.sea_level
+    assert restored.continent_scale == config.continent_scale
+    assert restored.detail_gain == config.detail_gain
+    assert restored.volcanic_activity_fraction == config.volcanic_activity_fraction
+
+    path = save_world_preset(config, directory=tmp_path)
+    assert path.exists()
+    loaded = load_world_preset(path)
+    assert loaded.seed == config.seed
+    assert loaded.sea_level == config.sea_level
+    assert list_world_presets(tmp_path, limit=5) == [path]
+
+
+def test_setup_actions_can_save_and_open_load_modal_without_running_window(tmp_path, monkeypatch):
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=9293))
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.load_preset_modal_open = False
+    viewer.setup_status_message = ""
+
+    monkeypatch.setattr("alife.viewer.DEFAULT_PRESET_DIR", tmp_path)
+    viewer._handle_setup_action("save_preset", "")
+
+    presets = list_world_presets(tmp_path, limit=5)
+    assert presets
+    assert "Saved preset" in viewer.setup_status_message
+
+    viewer._handle_setup_action("open_load_preset", "")
+    assert viewer.load_preset_modal_open is True
+
+
+def test_load_preset_modal_click_restores_planet_config(tmp_path):
+    original = Planet.generate(PlanetConfig(width=32, height=16, seed=9394, sea_level=0.42))
+    saved = save_world_preset(PlanetConfig(width=32, height=16, seed=9495, sea_level=0.62), directory=tmp_path)
+
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = original
+    viewer.speed = 1
+    viewer.in_setup_screen = True
+    viewer.intro_active = False
+    viewer.selected_cell = (1, 1)
+    viewer.selected_species_id = 123
+    viewer.setup_status_message = ""
+    viewer.load_preset_modal_open = True
+    viewer.load_preset_modal_close_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.load_preset_modal_rect = pygame.Rect(0, 0, 400, 300)
+    viewer.load_preset_row_rects = [(pygame.Rect(10, 10, 120, 20), saved)]
+    viewer._update_layout = lambda: None
+    viewer._invalidate_cache = lambda: None
+
+    viewer._handle_load_preset_modal_click((15, 15))
+
+    assert viewer.planet.config.seed == 9495
+    assert viewer.planet.config.sea_level == 0.62
+    assert viewer.selected_cell is None
+    assert viewer.selected_species_id is None
+    assert viewer.load_preset_modal_open is False
+    assert "Loaded" in viewer.setup_status_message

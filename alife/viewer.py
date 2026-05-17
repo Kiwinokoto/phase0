@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import secrets
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pygame
@@ -21,6 +24,11 @@ ATMOSPHERE_LAYER_NAMES: tuple[LayerName, ...] = ("clouds", "rain")
 LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
 WEATHER_OVERLAY_MODES: tuple[WeatherOverlayMode, ...] = ("off", "clouds", "rain", "all")
 PROJECTION_MODES: tuple[ProjectionMode, ...] = ("2d", "3d")
+
+WORLD_PRESET_KIND = "alife-world-preset"
+WORLD_PRESET_SCHEMA_VERSION = 1
+DEFAULT_PRESET_DIR = Path("saves/world_presets")
+CONFIG_PRESET_KEYS: tuple[str, ...] = tuple(field.name for field in fields(PlanetConfig))
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,64 @@ DETAIL_SETUP_FIELDS: tuple[SetupField, ...] = (
 )
 
 PLANET_SETUP_FIELDS: tuple[SetupField, ...] = PRIMARY_SETUP_FIELDS + DETAIL_SETUP_FIELDS
+
+
+def planet_config_to_preset(config: PlanetConfig) -> dict[str, object]:
+    """Serialize only the reproducible planet setup, not the live simulation.
+
+    This intentionally avoids storing populations, event logs or RNG state until
+    the model is more stable. It is a light "world preset" format, not a full
+    save-game format.
+    """
+    return {
+        "kind": WORLD_PRESET_KIND,
+        "schema_version": WORLD_PRESET_SCHEMA_VERSION,
+        "phase": "phase7",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "config": {key: getattr(config, key) for key in CONFIG_PRESET_KEYS},
+    }
+
+
+def planet_config_from_preset(data: dict[str, object]) -> PlanetConfig:
+    if data.get("kind") != WORLD_PRESET_KIND:
+        raise ValueError("Not an Artificial Life world preset.")
+    raw_config = data.get("config")
+    if not isinstance(raw_config, dict):
+        raise ValueError("World preset is missing its config block.")
+    kwargs = {key: raw_config[key] for key in CONFIG_PRESET_KEYS if key in raw_config}
+    config = PlanetConfig(**kwargs)
+    config.validate()
+    return config
+
+
+def save_world_preset(config: PlanetConfig, directory: Path | None = None) -> Path:
+    directory = DEFAULT_PRESET_DIR if directory is None else directory
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"world_seed{int(config.seed)}_{timestamp}.json"
+    path = directory / base_name
+    suffix = 1
+    while path.exists():
+        path = directory / f"world_seed{int(config.seed)}_{timestamp}_{suffix}.json"
+        suffix += 1
+    path.write_text(json.dumps(planet_config_to_preset(config), indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def load_world_preset(path: Path) -> PlanetConfig:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("World preset root must be a JSON object.")
+    return planet_config_from_preset(data)
+
+
+def list_world_presets(directory: Path | None = None, *, limit: int = 12) -> list[Path]:
+    directory = DEFAULT_PRESET_DIR if directory is None else directory
+    if not directory.exists():
+        return []
+    paths = [path for path in directory.glob("*.json") if path.is_file()]
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return paths[: max(0, int(limit))]
 
 
 @dataclass(frozen=True)
@@ -316,6 +382,11 @@ class PlanetViewer:
         self.life_tree_modal_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_row_rects: list[tuple[pygame.Rect, int]] = []
+        self.load_preset_modal_open = False
+        self.load_preset_modal_rect = pygame.Rect(0, 0, 0, 0)
+        self.load_preset_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.load_preset_row_rects: list[tuple[pygame.Rect, Path]] = []
+        self.setup_status_message = ""
         self.event_filter_show_volcanism = False
         self.event_birth_filter_mode = "early"  # early/all/hidden
         self.setup_control_rects: list[tuple[pygame.Rect, str, str]] = []
@@ -412,6 +483,10 @@ class PlanetViewer:
             self.panel_collapsed = False
             self._update_layout()
             self._invalidate_cache()
+            return
+
+        if getattr(self, "load_preset_modal_open", False):
+            self._handle_load_preset_modal_click(pos)
             return
 
         if self.life_tree_modal_open:
@@ -559,7 +634,38 @@ class PlanetViewer:
         if not self.life_tree_modal_rect.collidepoint(pos):
             self.life_tree_modal_open = False
 
+    def _handle_load_preset_modal_click(self, pos: tuple[int, int]) -> None:
+        if self.load_preset_modal_close_rect.collidepoint(pos):
+            self.load_preset_modal_open = False
+            return
+
+        for rect, path in self.load_preset_row_rects:
+            if rect.collidepoint(pos):
+                try:
+                    config = load_world_preset(path)
+                except Exception as exc:
+                    self.setup_status_message = f"Load failed: {exc}"
+                    self.load_preset_modal_open = False
+                    return
+                self.planet = Planet.generate(config)
+                self.speed = self.planet.config.initial_speed
+                self.in_setup_screen = True
+                self.intro_active = False
+                self.selected_cell = None
+                self.selected_species_id = None
+                self.setup_status_message = f"Loaded {path.name}"
+                self.load_preset_modal_open = False
+                self._update_layout()
+                self._invalidate_cache()
+                return
+
+        if not self.load_preset_modal_rect.collidepoint(pos):
+            self.load_preset_modal_open = False
+
     def _handle_key(self, key: int) -> bool:
+        if self.load_preset_modal_open and key == pygame.K_ESCAPE:
+            self.load_preset_modal_open = False
+            return True
         if self.life_tree_modal_open and key == pygame.K_ESCAPE:
             self.life_tree_modal_open = False
             return True
@@ -708,6 +814,8 @@ class PlanetViewer:
             self._draw_event_log_modal()
         if self.life_tree_modal_open:
             self._draw_life_tree_modal()
+        if self.load_preset_modal_open:
+            self._draw_load_preset_modal()
 
     def _get_map_surface(self) -> pygame.Surface:
         layer = "biome" if self.in_setup_screen else self.current_layer
@@ -765,6 +873,8 @@ class PlanetViewer:
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_row_rects = []
+        self.load_preset_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.load_preset_row_rects = []
         self.weather_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
         self.projection_button_rect = pygame.Rect(0, 0, 0, 0)
         self.panel_layout_button_rect = pygame.Rect(0, 0, 0, 0)
@@ -893,8 +1003,12 @@ class PlanetViewer:
         )
         y += 12
 
-        y = self._draw_section_title("Seed", x, y, width)
+        y = self._draw_section_title("Seed & presets", x, y, width)
         y = self._draw_seed_setup_row(x, y, width)
+        y = self._draw_preset_setup_row(x, y, width)
+        if self.setup_status_message:
+            self._draw_text(self._clip_text(self.setup_status_message, max(24, width // 7)), x, y, self.tiny_font, (155, 210, 170))
+            y += 16
         y += 8
 
         y = self._draw_section_title("Planet parameters", x, y, width)
@@ -1000,6 +1114,17 @@ class PlanetViewer:
         self._draw_button(random_rect, "Random")
         return y + 30
 
+    def _draw_preset_setup_row(self, x: int, y: int, width: int) -> int:
+        gap = 8
+        half = (width - gap) // 2
+        save_rect = pygame.Rect(x, y, half, 24)
+        load_rect = pygame.Rect(x + half + gap, y, half, 24)
+        self.setup_control_rects.append((save_rect, "save_preset", ""))
+        self.setup_control_rects.append((load_rect, "open_load_preset", ""))
+        self._draw_button(save_rect, "Save preset")
+        self._draw_button(load_rect, "Load preset")
+        return y + 30
+
     def _draw_setup_field_row(self, field: SetupField, x: int, y: int, width: int) -> int:
         row_h = 50
         self._draw_text(field.label, x, y + 5, self.tiny_font, (184, 193, 214))
@@ -1077,6 +1202,14 @@ class PlanetViewer:
             self.skip_intro = not self.skip_intro
         elif action == "random_seed":
             self._randomize_setup_seed()
+        elif action == "save_preset":
+            try:
+                path = save_world_preset(self.planet.config)
+                self.setup_status_message = f"Saved preset: {path.name}"
+            except Exception as exc:
+                self.setup_status_message = f"Save failed: {exc}"
+        elif action == "open_load_preset":
+            self.load_preset_modal_open = True
         elif action == "seed_delta":
             self._set_setup_config(seed=max(0, int(self.planet.config.seed) + int(key)))
         elif action == "field_delta":
@@ -1140,6 +1273,7 @@ class PlanetViewer:
         self.speed = self.planet.config.initial_speed
         self.selected_cell = None
         self.selected_species_id = None
+        self.setup_status_message = ""
         self._update_layout()
         self._invalidate_cache()
 
@@ -1245,11 +1379,13 @@ class PlanetViewer:
         )
 
     def _draw_event_log(self, x: int, y: int, width: int) -> int:
-        y = self._draw_section_title("Event log", x, y, width, key="events")
+        branch_count = sum(1 for event in self.planet.event_log if event.kind == "branch")
+        title = "Event log" if branch_count <= 0 else f"Event log · {branch_count} branches"
+        y = self._draw_section_title(title, x, y, width, key="events")
         if self._is_collapsed("events"):
             return y
 
-        events = self._filtered_events_newest(limit=5)
+        events = self._filtered_events_newest(limit=6)
         if not events:
             self._draw_text("No visible events with current filters.", x, y, self.tiny_font, (145, 154, 178))
             y += 18
@@ -1260,6 +1396,9 @@ class PlanetViewer:
                 if clickable:
                     self.event_log_row_rects.append((row_rect, int(event.species_id), event.location))
                 hovered = clickable and row_rect.collidepoint(pygame.mouse.get_pos())
+                if event.kind == "branch":
+                    pygame.draw.rect(self.screen, (58, 48, 24), row_rect, border_radius=4)
+                    pygame.draw.rect(self.screen, (145, 118, 52), row_rect, 1, border_radius=4)
                 if hovered:
                     pygame.draw.rect(self.screen, (35, 43, 58), row_rect, border_radius=4)
                     pygame.draw.rect(self.screen, (92, 110, 145), row_rect, 1, border_radius=4)
@@ -1461,13 +1600,25 @@ class PlanetViewer:
         movement_label = observer_migration_label(summary.mean_migration_pressure)
         isolation_label = observer_isolation_label(summary.mean_isolation_pressure)
         self._draw_text(
-            self._clip_text(f"movement: {movement_label}   isolation: {isolation_label}", max(28, width // 7)),
+            self._clip_text(f"range: {movement_label} / {isolation_label}", max(28, width // 7)),
             x,
             y,
             self.tiny_font,
             (182, 202, 226),
         )
         y += 14
+        y = self._draw_key_value_grid(
+            (
+                ("migr", f"{summary.mean_migration_pressure:.3f}"),
+                ("isolate", f"{summary.mean_isolation_pressure:.3f}"),
+                ("land", f"{100.0 * summary.land_share:.0f}%"),
+                ("cells", str(summary.occupied_cells)),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 4
 
         self._draw_text("Habitat summary", x, y, self.tiny_font, (220, 226, 240))
         y += 14
@@ -1556,6 +1707,89 @@ class PlanetViewer:
             text_color = (234, 242, 235) if selected else (190, 199, 218)
         self._draw_text(self._clip_text(label, 49), x + 18, y, self.tiny_font, text_color)
         return y + row_h
+
+    def _draw_load_preset_modal(self) -> None:
+        presets = list_world_presets(limit=12)
+        screen_w, screen_h = self.screen.get_size()
+        overlay = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
+        overlay.fill((3, 5, 10, 168))
+        self.screen.blit(overlay, (0, 0))
+
+        modal_w = min(760, screen_w - 90)
+        modal_h = min(560, screen_h - 86)
+        modal_w = max(520, modal_w)
+        modal_h = max(360, modal_h)
+        modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
+        self.load_preset_modal_rect = modal
+        self.load_preset_row_rects = []
+
+        pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
+        pygame.draw.rect(self.screen, (84, 96, 126), modal, 1, border_radius=12)
+        pygame.draw.rect(self.screen, (42, 49, 68), modal.inflate(-2, -2), 1, border_radius=11)
+
+        x = modal.left + 22
+        y = modal.top + 18
+        width = modal.width - 44
+        close_rect = pygame.Rect(modal.right - 40, modal.top + 14, 24, 24)
+        self.load_preset_modal_close_rect = close_rect
+        self._draw_button(close_rect, "×")
+
+        self._draw_text("Load planet preset", x, y, self.font, (238, 243, 252))
+        y += 24
+        self._draw_text(
+            "Simple save/load stores only seed + setup parameters, not live species or history.",
+            x,
+            y,
+            self.tiny_font,
+            (165, 176, 200),
+        )
+        y += 24
+
+        if not presets:
+            self._draw_text("No saved presets yet. Use Save preset on the setup screen first.", x, y, self.tiny_font, (180, 188, 206))
+            return
+
+        header_rect = pygame.Rect(x, y, width, 20)
+        pygame.draw.rect(self.screen, (28, 34, 48), header_rect, border_radius=5)
+        self._draw_text("file", x + 8, y + 3, self.tiny_font, (170, 182, 205))
+        self._draw_text("seed", x + int(width * 0.45), y + 3, self.tiny_font, (170, 182, 205))
+        self._draw_text("land/ocean", x + int(width * 0.58), y + 3, self.tiny_font, (170, 182, 205))
+        self._draw_text("year", x + int(width * 0.76), y + 3, self.tiny_font, (170, 182, 205))
+        y += 24
+
+        row_bottom = modal.bottom - 32
+        visible_rows = max(1, (row_bottom - y) // 24)
+        for path in presets[:visible_rows]:
+            try:
+                config = load_world_preset(path)
+                land = f"sea {config.sea_level:.2f}"
+                year = "auto" if int(config.seasonal_period_ticks) == 0 else str(config.seasonal_period_ticks)
+                seed_text = str(config.seed)
+            except Exception:
+                config = None
+                land = "invalid"
+                year = "—"
+                seed_text = "—"
+
+            row_rect = pygame.Rect(x, y, width, 21)
+            hovered = row_rect.collidepoint(pygame.mouse.get_pos())
+            fill = (35, 43, 58) if hovered else (22, 27, 38)
+            pygame.draw.rect(self.screen, fill, row_rect, border_radius=5)
+            pygame.draw.rect(self.screen, (60, 70, 95), row_rect, 1, border_radius=5)
+            if config is not None:
+                self.load_preset_row_rects.append((row_rect, path))
+                color = (220, 228, 244)
+            else:
+                color = (205, 80, 92)
+            self._draw_text(self._clip_text(path.name, max(12, int(width * 0.43) // 7)), x + 8, y + 4, self.tiny_font, color)
+            self._draw_text(seed_text, x + int(width * 0.45), y + 4, self.tiny_font, (210, 218, 236))
+            self._draw_text(land, x + int(width * 0.58), y + 4, self.tiny_font, (210, 218, 236))
+            self._draw_text(year, x + int(width * 0.76), y + 4, self.tiny_font, (210, 218, 236))
+            y += 24
+
+        remaining = len(presets) - visible_rows
+        if remaining > 0:
+            self._draw_text(f"… {remaining} older presets hidden", x, modal.bottom - 24, self.tiny_font, (150, 160, 184))
 
     def _draw_event_log_modal(self) -> None:
         all_events = list(reversed(self.planet.event_log))
@@ -2702,6 +2936,21 @@ def render_star_background(target_size: tuple[int, int], *, seed: int, rotation:
 
     return out
 
+
+def _roll_texture_seam_behind(texture: np.ndarray, rotation: float) -> np.ndarray:
+    """Roll a longitude texture so its 0/1 cut sits on the hidden globe side.
+
+    Screen-space globe sampling uses the middle half of the returned texture.
+    Choosing this roll makes the source longitude at the globe center match the
+    requested rotation while keeping the rectangular-map seam at the back.
+    """
+    width = int(texture.shape[1]) if texture.ndim >= 2 else 0
+    if width <= 1:
+        return texture
+    spin = (float(rotation) / (2.0 * np.pi)) % 1.0
+    shift = int(round((0.5 - spin) * width))
+    return np.roll(texture, shift, axis=1)
+
 def render_globe_texture(
     texture_rgb: np.ndarray,
     target_size: tuple[int, int],
@@ -2710,17 +2959,25 @@ def render_globe_texture(
     star_rotation: float | None = None,
     seed: int = 0,
 ) -> np.ndarray:
-    """Project an equirectangular layer texture onto a rotating orthographic globe."""
+    """Project an equirectangular layer texture onto a rotating orthographic globe.
+
+    The simulation map is still rectangular, so there is always one arbitrary
+    longitude cut in the source texture. For globe rendering, we dynamically
+    roll the texture so that cut stays on the hidden far side of the planet.
+    The visible hemisphere therefore samples the middle of the rolled texture
+    and never crosses the rectangular-map seam.
+    """
     target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
-    # The planet fields are generated horizontally tileable. Do not feather the
-    # texture seam here: the old render-only blend created a visible straight
-    # meridian on otherwise coherent globes.
     tex_h, tex_w = texture_rgb.shape[:2]
     if star_rotation is None:
         out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
         out[:, :] = np.array((8, 10, 18), dtype=np.uint8)
     else:
         out = render_star_background((target_w, target_h), seed=seed, rotation=star_rotation)
+
+    if tex_w <= 0 or tex_h <= 0:
+        return out
+    texture_for_view = _roll_texture_seam_behind(texture_rgb, rotation)
 
     radius = max(2.0, min(target_w, target_h) * 0.46)
     cx = (target_w - 1) / 2.0
@@ -2734,22 +2991,24 @@ def render_globe_texture(
         return out
 
     nz = np.sqrt(np.clip(1.0 - r2, 0.0, 1.0))
-    lon = np.arctan2(nx, nz) + float(rotation)
+    lon_visible = np.arctan2(nx, nz)
     lat = np.arcsin(np.clip(-ny, -1.0, 1.0))
-    u = (lon / (2.0 * np.pi)) % 1.0
+    # Visible hemisphere only: u stays in [0.25, 0.75], so the rolled
+    # texture boundary at 0/1 is never sampled on the front of the globe.
+    u = np.clip(0.5 + lon_visible / (2.0 * np.pi), 0.0, 0.999999)
     v = np.clip(0.5 - lat / np.pi, 0.0, 0.999999)
-    xf = u * tex_w
+    xf = u * (tex_w - 1)
     yf = v * (tex_h - 1)
-    x0 = np.floor(xf).astype(np.int32) % tex_w
-    x1 = (x0 + 1) % tex_w
+    x0 = np.clip(np.floor(xf).astype(np.int32), 0, tex_w - 1)
+    x1 = np.clip(x0 + 1, 0, tex_w - 1)
     y0 = np.clip(np.floor(yf).astype(np.int32), 0, tex_h - 1)
     y1 = np.clip(y0 + 1, 0, tex_h - 1)
     tx = (xf - np.floor(xf))[..., None]
     ty = (yf - np.floor(yf))[..., None]
-    c00 = texture_rgb[y0, x0].astype(np.float32)
-    c10 = texture_rgb[y0, x1].astype(np.float32)
-    c01 = texture_rgb[y1, x0].astype(np.float32)
-    c11 = texture_rgb[y1, x1].astype(np.float32)
+    c00 = texture_for_view[y0, x0].astype(np.float32)
+    c10 = texture_for_view[y0, x1].astype(np.float32)
+    c01 = texture_for_view[y1, x0].astype(np.float32)
+    c11 = texture_for_view[y1, x1].astype(np.float32)
     sampled = (c00 * (1.0 - tx) + c10 * tx) * (1.0 - ty) + (c01 * (1.0 - tx) + c11 * tx) * ty
     light = np.clip(0.38 + 0.62 * (0.72 * nz + 0.20 * nx - 0.10 * ny), 0.20, 1.08)
     limb = np.clip((1.0 - r2) * 7.0, 0.0, 1.0)
@@ -2778,6 +3037,7 @@ def render_globe_scalar_overlay(
     target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
     h, w = field.shape
     rgba = np.zeros((target_h, target_w, 4), dtype=np.uint8)
+    field_for_view = _roll_texture_seam_behind(field, rotation)
 
     radius = max(2.0, min(target_w, target_h) * 0.46)
     cx = (target_w - 1) / 2.0
@@ -2789,20 +3049,20 @@ def render_globe_scalar_overlay(
     mask = r2 <= 1.0
     if np.any(mask):
         nz = np.sqrt(np.clip(1.0 - r2, 0.0, 1.0))
-        lon = np.arctan2(nx, nz) + float(rotation)
+        lon_visible = np.arctan2(nx, nz)
         lat = np.arcsin(np.clip(-ny, -1.0, 1.0))
-        u = (lon / (2.0 * np.pi)) % 1.0
+        u = np.clip(0.5 + lon_visible / (2.0 * np.pi), 0.0, 0.999999)
         v = np.clip(0.5 - lat / np.pi, 0.0, 0.999999)
-        xf = u * w
+        xf = u * (w - 1)
         yf = v * (h - 1)
-        x0 = np.floor(xf).astype(np.int32) % w
-        x1 = (x0 + 1) % w
+        x0 = np.clip(np.floor(xf).astype(np.int32), 0, w - 1)
+        x1 = np.clip(x0 + 1, 0, w - 1)
         y0 = np.clip(np.floor(yf).astype(np.int32), 0, h - 1)
         y1 = np.clip(y0 + 1, 0, h - 1)
         tx = xf - np.floor(xf)
         ty = yf - np.floor(yf)
-        sampled = (field[y0, x0] * (1.0 - tx) + field[y0, x1] * tx) * (1.0 - ty) + (
-            field[y1, x0] * (1.0 - tx) + field[y1, x1] * tx
+        sampled = (field_for_view[y0, x0] * (1.0 - tx) + field_for_view[y0, x1] * tx) * (1.0 - ty) + (
+            field_for_view[y1, x0] * (1.0 - tx) + field_for_view[y1, x1] * tx
         ) * ty
         sampled = np.clip(sampled, 0.0, 1.0)
         alpha = np.clip(34 + 198 * np.sqrt(sampled / max(float(field.max()), 0.025)), 0, 226).astype(np.uint8)

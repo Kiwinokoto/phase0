@@ -23,6 +23,15 @@ Le viewer démarre maintenant sur un écran de préparation avant de lancer la s
 
 Les boutons `+` / `-` modifient immédiatement la planète prévisualisée. Chaque paramètre a aussi une barre colorée : clique ou glisse directement sur la barre pour régler rapidement la valeur entre son minimum et son maximum. Le bouton `Random` choisit une nouvelle seed.
 
+Le setup contient aussi un save/load simple :
+
+```text
+Save preset   sauvegarde la seed + les paramètres de planète dans saves/world_presets/
+Load preset   ouvre une modale listant les derniers presets sauvegardés
+```
+
+Ce n'est pas encore un vrai save-game : les espèces, populations, événements et l'état RNG de la simulation en cours ne sont pas sauvegardés. C'est volontaire pour éviter de figer trop tôt un format de sauvegarde alors que les phases changent encore le modèle.
+
 Paramètres modifiables dans le setup :
 
 ```text
@@ -46,6 +55,7 @@ Par défaut, `Skip formation intro` est coché pour permettre les tests rapides 
 Raccourcis utiles pendant le setup :
 
 ```text
+Load modal    clique une ligne pour restaurer une planète, Esc pour fermer
 Enter/Space   lancer la simulation ou skipper l’intro
 r             seed aléatoire
 f/F11         plein écran / fenêtre
@@ -514,3 +524,16 @@ body_plan
 Elle affiche une carte population-weighted de différenciation morphologique : zones sombres = formes simples ou peu présentes ; zones plus claires = lignées localement plus structurées/complexes.
 
 La species card affiche désormais une section `Body plan`, et la vignette specimen utilise ces traits pour produire une impression visuelle plus stable et plus narrative. Cela reste une visualisation d'une lignée, pas un individu simulé.
+
+## Phase 7 polish — observer and globe rendering
+
+This pass closes the Phase 6 observer polish while keeping Phase 7 body-plan work intact:
+
+- compact event log rows linked to a lineage are clickable directly from the panel;
+- branch/speciation events are highlighted in the compact log with `★ DESC`;
+- Life summary keeps the branch count visible in the collapsed title;
+- selected lineage text is no longer drawn on top of the planet render;
+- the species card now summarizes range dynamics more clearly with movement/isolation labels and scores;
+- 3D globe rendering now rolls the rectangular map seam to the hidden far side of the planet before projection, avoiding the artificial straight meridian where two map edges looked glued together.
+
+The seam fix is visual only: the simulation still runs on the same 2D fields, and click/selection mapping remains tied to the same longitude rotation.
