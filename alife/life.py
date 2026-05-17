@@ -10,10 +10,10 @@ class LifeTraits:
     """Heritable parameters for an abstract proto-lineage.
 
     These traits deliberately describe verbs/capabilities, not fixed categories
-    like plant, animal, herbivore, or predator. Phase 5 adds life-on-life
-    ecological pressure, still in this same verb-based model: a lineage may
-    extract energy from living biomass, resist being consumed, or buffer bad
-    periods with storage.
+    like plant, animal, herbivore, or predator. Phase 7 adds morphology/body-plan
+    parameters, but they remain population-level abstractions: they change costs,
+    vulnerability, dispersal and resource capture without creating individual
+    organisms.
     """
 
     photosynthesis: float
@@ -22,6 +22,14 @@ class LifeTraits:
     living_consumption: float
     defense: float
     storage: float
+    size: float
+    structure: float
+    surface_area: float
+    armor: float
+    speed: float
+    longevity: float
+    fragility: float
+    complexity: float
     temperature_optimum_c: float
     temperature_tolerance_c: float
     water_preference: float
@@ -40,6 +48,14 @@ class LifeTraits:
             living_consumption=_clip01(self.living_consumption),
             defense=_clip01(self.defense),
             storage=_clip01(self.storage),
+            size=_clip01(self.size),
+            structure=_clip01(self.structure),
+            surface_area=_clip01(self.surface_area),
+            armor=_clip01(self.armor),
+            speed=_clip01(self.speed),
+            longevity=_clip01(self.longevity),
+            fragility=_clip01(self.fragility),
+            complexity=_clip01(self.complexity),
             temperature_optimum_c=float(np.clip(self.temperature_optimum_c, -18.0, 48.0)),
             temperature_tolerance_c=float(np.clip(self.temperature_tolerance_c, 6.0, 34.0)),
             water_preference=_clip01(self.water_preference),
@@ -110,6 +126,15 @@ def seed_traits_from_environment(
     organic_absorption = 0.05 + 0.38 * organic_bias / total
     living_consumption = 0.02 + 0.08 * float(rng.random())
 
+    primitive_size = float(np.clip(0.12 + rng.random() * 0.18 + 0.05 * organic_absorption, 0.0, 0.38))
+    primitive_structure = float(np.clip(0.06 + toxicity * 0.08 + rng.random() * 0.16, 0.0, 0.34))
+    primitive_surface = float(np.clip(0.30 + 0.32 * photosynthesis + rng.normal(0.0, 0.08), 0.10, 0.82))
+    primitive_armor = float(np.clip(0.03 + toxicity * 0.10 + rng.random() * 0.12, 0.0, 0.26))
+    primitive_speed = float(np.clip(0.03 + rng.random() * 0.14 + 0.05 * living_consumption, 0.0, 0.26))
+    primitive_longevity = float(np.clip(0.10 + rng.random() * 0.18, 0.0, 0.36))
+    primitive_fragility = float(np.clip(0.38 + 0.24 * primitive_surface - 0.18 * primitive_structure + rng.normal(0.0, 0.08), 0.08, 0.82))
+    primitive_complexity = float(np.clip(0.04 + rng.random() * 0.14, 0.0, 0.28))
+
     return LifeTraits(
         photosynthesis=float(np.clip(photosynthesis + rng.normal(0.0, 0.05), 0.0, 1.0)),
         chemosynthesis=float(np.clip(chemosynthesis + rng.normal(0.0, 0.05), 0.0, 1.0)),
@@ -117,6 +142,14 @@ def seed_traits_from_environment(
         living_consumption=float(np.clip(living_consumption + rng.normal(0.0, 0.025), 0.0, 0.18)),
         defense=float(np.clip(0.06 + toxicity * 0.10 + rng.random() * 0.14, 0.0, 0.32)),
         storage=float(np.clip(0.08 + rng.random() * 0.18, 0.0, 0.34)),
+        size=primitive_size,
+        structure=primitive_structure,
+        surface_area=primitive_surface,
+        armor=primitive_armor,
+        speed=primitive_speed,
+        longevity=primitive_longevity,
+        fragility=primitive_fragility,
+        complexity=primitive_complexity,
         temperature_optimum_c=float(temperature_c + rng.normal(0.0, 4.0)),
         temperature_tolerance_c=float(np.clip(13.0 + rng.normal(0.0, 3.0), 7.0, 26.0)),
         water_preference=float(np.clip(water_access + rng.normal(0.0, 0.08), 0.0, 1.0)),
@@ -135,9 +168,11 @@ def mutate_traits(
     strength: float,
 ) -> LifeTraits:
     """Return a nearby genotype, preserving parent similarity."""
-    # A small chance of a bigger trophic/defensive innovation makes Phase 5 more
-    # watchable without hard-coding consumers. Most mutations remain subtle.
+    # A small chance of bigger trophic/defensive/morphological innovation makes
+    # Phase 7 watchable without hard-coding any category. Most mutations stay
+    # subtle and parent-like.
     trophic_strength = strength * (1.65 if rng.random() < 0.12 else 0.95)
+    morphology_strength = strength * (1.80 if rng.random() < 0.16 else 0.90)
     return LifeTraits(
         photosynthesis=float(parent.photosynthesis + rng.normal(0.0, strength)),
         chemosynthesis=float(parent.chemosynthesis + rng.normal(0.0, strength)),
@@ -145,6 +180,14 @@ def mutate_traits(
         living_consumption=float(parent.living_consumption + rng.normal(0.0, trophic_strength * 0.95)),
         defense=float(parent.defense + rng.normal(0.0, trophic_strength * 0.80)),
         storage=float(parent.storage + rng.normal(0.0, strength * 0.75)),
+        size=float(parent.size + rng.normal(0.0, morphology_strength * 0.70)),
+        structure=float(parent.structure + rng.normal(0.0, morphology_strength * 0.70)),
+        surface_area=float(parent.surface_area + rng.normal(0.0, morphology_strength * 0.85)),
+        armor=float(parent.armor + rng.normal(0.0, morphology_strength * 0.65)),
+        speed=float(parent.speed + rng.normal(0.0, morphology_strength * 0.75)),
+        longevity=float(parent.longevity + rng.normal(0.0, morphology_strength * 0.55)),
+        fragility=float(parent.fragility + rng.normal(0.0, morphology_strength * 0.75)),
+        complexity=float(parent.complexity + rng.normal(0.0, morphology_strength * 0.45 + strength * 0.15)),
         temperature_optimum_c=float(parent.temperature_optimum_c + rng.normal(0.0, 5.0 * strength / 0.10)),
         temperature_tolerance_c=float(parent.temperature_tolerance_c + rng.normal(0.0, 2.5 * strength / 0.10)),
         water_preference=float(parent.water_preference + rng.normal(0.0, strength)),
@@ -157,17 +200,34 @@ def mutate_traits(
     ).clipped()
 
 
+def morphology_index(traits: LifeTraits) -> float:
+    """Compact observer score for body-plan differentiation."""
+    return float(
+        np.clip(
+            0.18 * traits.size
+            + 0.17 * traits.structure
+            + 0.15 * traits.surface_area
+            + 0.14 * traits.armor
+            + 0.13 * traits.speed
+            + 0.12 * traits.longevity
+            + 0.11 * traits.complexity,
+            0.0,
+            1.0,
+        )
+    )
+
+
 def species_color(traits: LifeTraits) -> tuple[int, int, int]:
-    """Stable visible color derived from ecological strategy traits."""
+    """Stable visible color derived from ecological strategy and morphology."""
     photo = traits.photosynthesis
     chemo = traits.chemosynthesis
     detritus = traits.organic_absorption
     living = traits.living_consumption
     defense = traits.defense
-    mobility = traits.dispersal
-    r = int(np.clip(50 + 85 * detritus + 125 * living + 95 * chemo + 20 * defense, 35, 255))
-    g = int(np.clip(60 + 155 * photo + 40 * detritus + 30 * defense, 45, 255))
-    b = int(np.clip(70 + 115 * chemo + 58 * mobility + 42 * defense, 50, 255))
+    mobility = 0.55 * traits.dispersal + 0.45 * traits.speed
+    r = int(np.clip(50 + 85 * detritus + 125 * living + 95 * chemo + 24 * traits.armor + 18 * traits.size, 35, 255))
+    g = int(np.clip(60 + 155 * photo + 40 * detritus + 30 * defense + 25 * traits.surface_area, 45, 255))
+    b = int(np.clip(70 + 115 * chemo + 58 * mobility + 42 * defense + 28 * traits.complexity, 50, 255))
     return (r, g, b)
 
 
@@ -180,6 +240,16 @@ def infer_strategy_label(traits: LifeTraits) -> str:
         "living": traits.living_consumption,
     }
     primary = max(values, key=values.get)
+    if traits.armor >= 0.58 and traits.size >= 0.35:
+        return "armored form"
+    if traits.surface_area >= 0.68 and primary == "photo":
+        return "broad sun-form"
+    if traits.speed >= 0.54 and traits.dispersal >= 0.28:
+        return "swift colonizer"
+    if traits.longevity >= 0.62 and traits.storage >= 0.40:
+        return "long-lived reservoir"
+    if traits.complexity >= 0.56:
+        return "complex protoform"
     if traits.defense >= 0.62 and traits.dispersal < 0.22:
         return "defensive mat"
     if primary == "living" and traits.dispersal >= 0.25:

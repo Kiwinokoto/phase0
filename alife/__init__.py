@@ -1,4 +1,4 @@
-"""Phase 6 prototype for mobility, colonization and local divergence."""
+"""Phase 7 prototype for morphology and body-plan tradeoffs."""
 
 from .config import PlanetConfig
 from .life import LifeSpecies, LifeTraits

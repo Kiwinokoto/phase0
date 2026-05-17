@@ -11,6 +11,7 @@ from .life import (
     infer_strategy_label,
     make_species_name,
     mutate_traits,
+    morphology_index as species_morphology_index,
     seed_traits_from_environment,
     species_color,
 )
@@ -57,12 +58,11 @@ class LineageHabitatSummary:
 
 @dataclass
 class Planet:
-    """Generated 2D planet fields for Phase 5.
+    """Generated 2D planet fields for Phase 7.
 
     Field shapes are always (height, width). Values are normalized to [0, 1]
-    except temperature_c. Phase 4 keeps proto-life abstract, but adds stronger
-    ecological pressure: local carrying capacity, maintenance consumption,
-    starvation/turnover, dead matter, and more meaningful extinction dynamics.
+    except temperature_c. Phase 7 adds morphology/body-plan tradeoffs while
+    keeping life as lineage population fields rather than individual organisms.
     """
 
     config: PlanetConfig
@@ -88,6 +88,7 @@ class Planet:
     biotic_pressure: np.ndarray
     migration_pressure: np.ndarray
     isolation_pressure: np.ndarray
+    morphology_index: np.ndarray
     populations: np.ndarray
     biomass: np.ndarray
     diversity: np.ndarray
@@ -135,6 +136,7 @@ class Planet:
         biotic_pressure = np.zeros_like(fertility, dtype=np.float32)
         migration_pressure = np.zeros_like(fertility, dtype=np.float32)
         isolation_pressure = np.zeros_like(fertility, dtype=np.float32)
+        morphology_index = np.zeros_like(fertility, dtype=np.float32)
         populations = np.zeros((config.max_species, config.height, config.width), dtype=np.float32)
         biomass = np.zeros_like(fertility, dtype=np.float32)
         diversity = np.zeros_like(fertility, dtype=np.float32)
@@ -164,6 +166,7 @@ class Planet:
             biotic_pressure=biotic_pressure,
             migration_pressure=migration_pressure,
             isolation_pressure=isolation_pressure,
+            morphology_index=morphology_index,
             populations=populations,
             biomass=biomass,
             diversity=diversity,
@@ -617,7 +620,8 @@ class Planet:
 
             for idx, sp in enumerate(self.species):
                 if not sp.is_extinct:
-                    defense_biomass += (active_populations[idx] * sp.traits.defense).astype(np.float32)
+                    protection = np.clip(sp.traits.defense + 0.55 * sp.traits.armor + 0.25 * sp.traits.structure - 0.20 * sp.traits.fragility, 0.0, 1.0)
+                    defense_biomass += (active_populations[idx] * protection).astype(np.float32)
 
             updated_indices: list[int] = []
             for index, species in enumerate(self.species):
@@ -629,6 +633,19 @@ class Planet:
                     continue
 
                 traits = species.traits
+                body_size = traits.size
+                structure = traits.structure
+                surface_area = traits.surface_area
+                armor = traits.armor
+                speed = traits.speed
+                longevity = traits.longevity
+                fragility = traits.fragility
+                complexity = traits.complexity
+                effective_dispersal = float(np.clip(
+                    traits.dispersal * (0.55 + 0.72 * speed) * (1.0 - 0.32 * armor) * (1.0 - 0.22 * body_size),
+                    0.0,
+                    1.0,
+                ))
                 temp_fit = np.exp(-((self.temperature_c - traits.temperature_optimum_c) / traits.temperature_tolerance_c) ** 2)
                 water_fit = np.clip(
                     1.0 - np.abs(water_access - traits.water_preference) / traits.water_tolerance,
@@ -641,55 +658,77 @@ class Planet:
 
                 other_biomass = np.clip(biomass_before - pop, 0.0, 1.0)
                 other_defense = np.divide(
-                    np.maximum(0.0, defense_biomass - pop * traits.defense),
+                    np.maximum(0.0, defense_biomass - pop * np.clip(traits.defense + 0.55 * armor + 0.25 * structure - 0.20 * fragility, 0.0, 1.0)),
                     np.maximum(other_biomass, 1e-6),
                     out=np.zeros_like(other_biomass, dtype=np.float32),
                     where=other_biomass > 1e-6,
                 )
                 prey_vulnerability = np.clip(1.0 - other_defense, 0.0, 1.0)
+                capture_factor = np.clip(0.70 + 0.36 * speed + 0.18 * body_size + 0.12 * complexity - 0.10 * armor, 0.45, 1.45)
                 living_energy = (
                     self.config.living_consumption_energy_weight
                     * traits.living_consumption
+                    * capture_factor
                     * other_biomass
                     * prey_vulnerability
                     * (0.28 + 0.72 * habitat_fit)
                 )
 
-                photo_energy = traits.photosynthesis * self.light * self.nutrients * water_fit
-                chemo_energy = traits.chemosynthesis * self.chemical_energy * (0.25 + 0.75 * self.minerals)
-                organic_energy = traits.organic_absorption * self.dead_matter
+                surface_factor = np.clip(0.62 + 0.72 * surface_area - 0.18 * armor, 0.35, 1.32)
+                photo_energy = traits.photosynthesis * surface_factor * self.light * self.nutrients * water_fit
+                chemo_energy = traits.chemosynthesis * self.chemical_energy * (0.25 + 0.75 * self.minerals) * (0.88 + 0.18 * structure)
+                organic_energy = traits.organic_absorption * self.dead_matter * (0.92 + 0.18 * surface_area)
                 energy_gain = photo_energy + chemo_energy + organic_energy + living_energy
 
+                morphology_cost = (
+                    self.config.size_metabolic_cost * body_size
+                    + self.config.structure_metabolic_cost * structure
+                    + self.config.surface_area_metabolic_cost * surface_area
+                    + self.config.armor_metabolic_cost * armor
+                    + self.config.speed_metabolic_cost * speed
+                    + self.config.complexity_metabolic_cost * complexity
+                )
                 trait_cost = (
                     self.config.living_consumption_metabolic_cost * traits.living_consumption
                     + self.config.defense_metabolic_cost * traits.defense
                     + self.config.storage_metabolic_cost * traits.storage
+                    + morphology_cost
                 )
                 effective_metabolism = traits.metabolism_cost + trait_cost
-                storage_buffer = 0.35 * traits.storage
+                storage_buffer = 0.35 * traits.storage + 0.16 * longevity
 
                 # Phase 5: life is now limited by environmental capacity and by
                 # other life. Defensive/storage traits cost energy but reduce
                 # crashes; living-biomass extraction adds energy only where other
                 # biomass already exists and is vulnerable.
                 local_capacity = np.clip(
-                    0.02 + 0.68 * self.fertility + 0.26 * energy_gain * habitat_fit + 0.04 * traits.storage,
+                    0.02
+                    + 0.66 * self.fertility
+                    + 0.24 * energy_gain * habitat_fit
+                    + 0.04 * traits.storage
+                    + 0.035 * structure
+                    + 0.025 * body_size,
                     0.015,
                     1.0,
                 )
                 over_capacity = np.maximum(0.0, biomass_before - local_capacity)
 
-                growth = traits.reproduction_rate * energy_gain * habitat_fit * (1.0 - 0.18 * traits.storage)
-                stress = self.config.life_stress_rate * (1.0 - habitat_fit)
+                reproduction_drag = np.clip(1.0 - 0.22 * traits.storage - 0.32 * body_size - 0.16 * longevity - 0.12 * complexity, 0.28, 1.08)
+                growth = traits.reproduction_rate * energy_gain * habitat_fit * reproduction_drag
+                stress_modifier = np.clip(1.0 + 0.48 * fragility + 0.18 * surface_area - 0.25 * longevity - 0.16 * structure, 0.45, 1.65)
+                stress = self.config.life_stress_rate * (1.0 - habitat_fit) * stress_modifier
                 starvation = np.maximum(0.0, effective_metabolism - (0.55 + storage_buffer) * energy_gain * habitat_fit)
-                crowding = self.config.life_crowding_rate * over_capacity
+                crowding = self.config.life_crowding_rate * over_capacity * (1.0 + 0.20 * body_size)
                 net = growth - effective_metabolism - stress - starvation - crowding
 
                 multiplier = np.exp(np.clip(net * dt * self.config.life_time_scale, -0.95, 0.42))
                 updated = np.clip(pop * multiplier, 0.0, 1.0).astype(np.float32)
 
                 turnover_pressure = np.clip(
-                    (0.35 + 2.50 * stress + 2.10 * starvation + 1.40 * crowding) * (1.0 - 0.28 * traits.storage),
+                    (0.35 + 2.50 * stress + 2.10 * starvation + 1.40 * crowding)
+                    * (1.0 - 0.28 * traits.storage)
+                    * (1.0 - 0.30 * longevity)
+                    * (1.0 + 0.42 * fragility),
                     0.0,
                     7.0,
                 )
@@ -697,21 +736,21 @@ class Planet:
                 turnover_deaths = updated * turnover_fraction
                 updated = np.maximum(updated - turnover_deaths, 0.0).astype(np.float32)
 
-                if traits.dispersal > 0.0:
+                if effective_dispersal > 0.0:
                     before_move = updated.copy()
                     updated = _diffuse(
                         updated,
-                        self.config.life_dispersal_rate * traits.dispersal,
+                        self.config.life_dispersal_rate * effective_dispersal,
                         max(1, int(round(dt))),
                     ).astype(np.float32)
                     updated, moved = _adaptive_migrate(
                         updated,
                         habitat_fit.astype(np.float32),
-                        self.config.active_migration_rate * traits.dispersal,
+                        self.config.active_migration_rate * effective_dispersal,
                         dt,
                     )
                     if float(moved.max()) > 0.0:
-                        migration_loss = np.minimum(updated, moved * self.config.active_migration_cost * (0.35 + traits.dispersal))
+                        migration_loss = np.minimum(updated, moved * self.config.active_migration_cost * (0.35 + effective_dispersal + 0.25 * body_size))
                         updated = np.maximum(updated - migration_loss, 0.0).astype(np.float32)
                         self.dead_matter += (0.18 * migration_loss).astype(np.float32)
                         colonized = np.clip((updated - before_move) * (before_move < 0.004), 0.0, 1.0)
@@ -728,7 +767,7 @@ class Planet:
                 growth_use = self.config.life_resource_consumption_rate * growth_amount
                 maintenance_use = self.config.life_maintenance_consumption_rate * dt * updated
                 resource_use = growth_use + maintenance_use
-                self.nutrients -= resource_use * (0.60 * traits.photosynthesis + 0.30 * traits.organic_absorption + 0.05 * traits.defense + 0.08)
+                self.nutrients -= resource_use * (0.60 * traits.photosynthesis + 0.30 * traits.organic_absorption + 0.05 * traits.defense + 0.05 * structure + 0.08)
                 self.chemical_energy -= resource_use * (0.88 * traits.chemosynthesis)
                 self.dead_matter -= resource_use * (0.58 * traits.organic_absorption)
 
@@ -739,7 +778,7 @@ class Planet:
                     updated
                     * traits.living_consumption
                     * (0.20 + 0.80 * habitat_fit)
-                    * (0.45 + 0.55 * traits.dispersal)
+                    * (0.40 + 0.40 * effective_dispersal + 0.20 * speed)
                 ).astype(np.float32)
 
                 updated[updated < 1e-5] = 0.0
@@ -755,7 +794,15 @@ class Planet:
                         species = self.species[index]
                         traits = species.traits
                         pop = self.populations[index]
-                        vulnerability = np.clip((1.0 - traits.defense) * (1.0 - 0.32 * traits.storage), 0.0, 1.0)
+                        vulnerability = np.clip(
+                            (1.0 - traits.defense)
+                            * (1.0 - 0.32 * traits.storage)
+                            * (1.0 - 0.54 * traits.armor)
+                            * (1.0 - 0.22 * traits.structure)
+                            * (1.0 + 0.44 * traits.fragility),
+                            0.0,
+                            1.0,
+                        )
                         loss_fraction = 1.0 - np.exp(-self.config.biotic_pressure_rate * dt * pressure_norm * vulnerability)
                         losses = np.minimum(pop, pop * loss_fraction).astype(np.float32)
                         if float(losses.max()) > 0.0:
@@ -919,14 +966,25 @@ class Planet:
             self.biotic_pressure.fill(0.0)
             self.migration_pressure.fill(0.0)
             self.isolation_pressure.fill(0.0)
+            self.morphology_index.fill(0.0)
             return
 
         active = self.populations[: len(self.species)]
-        self.biomass = np.clip(active.sum(axis=0), 0.0, 1.0).astype(np.float32)
+        raw_biomass = np.clip(active.sum(axis=0), 0.0, None).astype(np.float32)
+        self.biomass = np.clip(raw_biomass, 0.0, 1.0).astype(np.float32)
         self.diversity = np.clip((active > 0.01).sum(axis=0) / max(1, min(8, len(self.species))), 0.0, 1.0).astype(np.float32)
         dominant = np.argmax(active, axis=0).astype(np.int16)
         dominant[self.biomass <= 0.01] = -1
         self.dominant_species_index = dominant
+
+        morph_values = np.array([species_morphology_index(species.traits) for species in self.species], dtype=np.float32)
+        weighted_morphology = (active * morph_values[:, None, None]).sum(axis=0)
+        self.morphology_index = np.divide(
+            weighted_morphology,
+            np.maximum(raw_biomass, 1e-6),
+            out=np.zeros_like(raw_biomass, dtype=np.float32),
+            where=raw_biomass > 1e-6,
+        ).astype(np.float32)
 
 
     def top_species_near(
@@ -1133,6 +1191,7 @@ def _generate_humidity(
     humidity = 0.70 * humidity + 0.20 * climate_noise + 0.10 * normalized_temp
     humidity -= 0.20 * land_height
     humidity[water > 0.0] = np.maximum(humidity[water > 0.0], 0.75 + 0.20 * water[water > 0.0])
+    humidity = _soften_horizontal_wrap(humidity, columns=max(6, config.width // 24))
     return np.clip(humidity, 0.0, 1.0).astype(np.float32)
 
 
@@ -1181,6 +1240,7 @@ def _generate_minerals(
     mountains = np.clip((elevation - 0.68) / 0.25, 0.0, 1.0) * land
     minerals = 0.34 * mineral_noise + 0.32 * land_height + 0.24 * mountains + 0.42 * volcanism
     minerals = _blur4(minerals, passes=1)
+    minerals = _soften_horizontal_wrap(minerals, columns=max(6, config.width // 24))
     return np.clip(minerals, 0.0, 1.0).astype(np.float32)
 
 
@@ -1215,6 +1275,7 @@ def _generate_nutrients(
         + 0.20 * humidity * lowland
     )
     nutrients = nutrients * (0.35 + 0.65 * land.astype(np.float32)) + 0.22 * shallow_water
+    nutrients = _soften_horizontal_wrap(nutrients, columns=max(6, config.width // 24))
     return np.clip(nutrients, 0.0, 1.0).astype(np.float32)
 
 
@@ -1405,6 +1466,31 @@ def _local_relief(values: np.ndarray) -> np.ndarray:
         ]
     )
     return _normalize(relief)
+
+
+def _soften_horizontal_wrap(values: np.ndarray, columns: int = 8) -> np.ndarray:
+    """Return a copy whose left/right border blends without a hard seam.
+
+    This is used only for continuous generated fields affected by directional
+    climate passes. Terrain noise is now horizontally tileable, but humidity is
+    produced by a toy wind sweep and therefore needs a small wrap correction so
+    the globe does not show a rectangular-map meridian.
+    """
+    _h, w = values.shape[:2]
+    band = int(min(max(0, columns), max(0, w // 2 - 1)))
+    if band <= 0:
+        return values.astype(np.float32, copy=True)
+
+    out = values.astype(np.float32, copy=True)
+    # Target seam value is a gentle average of both physical neighbors.
+    seam = 0.5 * (out[:, :band] + out[:, -band:])
+    for i in range(band):
+        t = (i + 1) / float(band + 1)
+        # strongest blend right at the seam, fading inward.
+        blend = 1.0 - t
+        out[:, i] = out[:, i] * (1.0 - 0.55 * blend) + seam[:, i] * (0.55 * blend)
+        out[:, -band + i] = out[:, -band + i] * (1.0 - 0.55 * blend) + seam[:, i] * (0.55 * blend)
+    return out.astype(np.float32)
 
 
 def _blur4(values: np.ndarray, passes: int = 1) -> np.ndarray:

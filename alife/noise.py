@@ -23,7 +23,11 @@ def value_noise_2d(
     grid_h = max(2, int(grid_h))
 
     # +1 so interpolation has a right/bottom edge to sample.
+    # The last horizontal lattice column is copied from the first one so the
+    # planet wraps cleanly around longitude 0 when projected as a globe. The
+    # vertical axis is intentionally not wrapped: poles are edges, not a seam.
     lattice = rng.random((grid_h + 1, grid_w + 1), dtype=np.float64)
+    lattice[:, -1] = lattice[:, 0]
 
     xs = np.linspace(0.0, grid_w, width, endpoint=False)
     ys = np.linspace(0.0, grid_h, height, endpoint=False)

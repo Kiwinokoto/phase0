@@ -1,4 +1,4 @@
-# Artificial Life Sandbox — Phase 6
+# Artificial Life Sandbox — Phase 7
 
 Prototype Python minimal pour générer et observer une planète 2D/3D avec proto-vie abstraite, interactions écologiques, mobilité et colonisation.
 
@@ -115,7 +115,7 @@ La card d’une lignée sélectionnée affiche aussi une petite **specimen impre
 
 `View: 2D` conserve la carte équirectangulaire classique, pratique pour lire les couches.
 
-`View: 3D` projette la même couche sur une planète en rotation lente. Ce n'est pas un moteur 3D physique : c'est un rendu orthographique logiciel de la texture 2D actuelle. Le clic d'inspection fonctionne aussi sur le disque visible de la planète ; les zones cachées au dos ne sont simplement pas cliquables.
+`View: 3D` projette la même couche sur une planète en rotation lente. Ce n'est pas un moteur 3D physique : c'est un rendu orthographique logiciel de la texture 2D actuelle. Le clic d'inspection fonctionne aussi sur le disque visible de la planète ; les zones cachées au dos ne sont simplement pas cliquables. Les nouvelles planètes utilisent maintenant un bruit horizontalement tileable pour éviter le méridien artificiel visible quand les bords gauche/droit de l'ancienne carte rectangulaire étaient collés sur le globe.
 
 En vue 3D, le fond spatial affiche maintenant un champ d'étoiles déterministe par seed. Il tourne plus lentement que la planète, avec un cycle complet sur la durée d'une année locale (`seasonal_period_ticks`).
 
@@ -473,3 +473,44 @@ This patch changes the observer defaults and makes lineage history easier to ins
 - descendant rows are shown in yellow, extinct rows in crimson.
 
 The global life tree is still observational only. It does not change population dynamics.
+
+## Phase 6 final observer polish
+
+This closes the Phase 6 observer pass before moving toward morphology/body plans:
+
+```text
+- compact Event log rows linked to a species are now clickable, not only modal rows;
+- branch/speciation events are prefixed with ★ DESC in the compact log;
+- Life summary shows a compact branch count even when folded;
+- the top-left selected-lineage label was removed from the planet render;
+- selected lineage state now lives in the right panel/species card only;
+- the planet generator now uses horizontally tileable value noise so new worlds wrap naturally in 3D;
+- the 3D renderer no longer applies the old seam-feather band that could create a straight meridian;
+- species cards add a plain-language movement/isolation line to explain frontier/branch pressure.
+```
+
+
+## Phase 7 morphology / body plans
+
+Phase 7 garde la philosophie populationnelle : aucune simulation d'individus n'est ajoutée. En revanche, chaque lignée possède maintenant des traits morphologiques héritables qui influencent réellement sa dynamique :
+
+- `size` ;
+- `structure` ;
+- `surface_area` ;
+- `armor` ;
+- `speed` ;
+- `longevity` ;
+- `fragility` ;
+- `complexity`.
+
+Ces traits ne sont pas gratuits : les formes plus grandes, rapides, armurées ou complexes coûtent plus cher à maintenir. Elles peuvent aussi modifier la capture de ressources, la vulnérabilité à la pression biotique, la migration et le rythme de reproduction.
+
+Nouvelle couche :
+
+```text
+body_plan
+```
+
+Elle affiche une carte population-weighted de différenciation morphologique : zones sombres = formes simples ou peu présentes ; zones plus claires = lignées localement plus structurées/complexes.
+
+La species card affiche désormais une section `Body plan`, et la vignette specimen utilise ces traits pour produire une impression visuelle plus stable et plus narrative. Cela reste une visualisation d'une lignée, pas un individu simulé.

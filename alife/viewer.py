@@ -16,7 +16,7 @@ WeatherOverlayMode = str
 ProjectionMode = str
 Color = tuple[int, int, int]
 
-LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life", "biotic_pressure", "migration_pressure", "isolation_pressure")
+LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life", "biotic_pressure", "migration_pressure", "isolation_pressure", "body_plan")
 ATMOSPHERE_LAYER_NAMES: tuple[LayerName, ...] = ("clouds", "rain")
 LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
 WEATHER_OVERLAY_MODES: tuple[WeatherOverlayMode, ...] = ("off", "clouds", "rain", "all")
@@ -89,8 +89,15 @@ def specimen_keywords(species) -> tuple[str, ...]:
         (traits.chemosynthesis, "vent-fed"),
         (traits.organic_absorption, "detritus-feeder"),
         (traits.living_consumption, "biomass-feeder"),
-        (traits.defense, "armored"),
+        (traits.defense, "defensive"),
         (traits.storage, "reservoir"),
+        (traits.size, "large-bodied"),
+        (traits.structure, "structured"),
+        (traits.surface_area, "broad-surface"),
+        (traits.armor, "armored"),
+        (traits.speed, "swift"),
+        (traits.longevity, "long-lived"),
+        (traits.complexity, "complex"),
         (traits.dispersal, "wanderer"),
         (traits.toxicity_tolerance, "toxin-tolerant"),
     ]
@@ -231,11 +238,17 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
         colors=((12, 10, 18), (94, 70, 150), (255, 218, 92)),
         labels=("connected", "edge", "isolated"),
     ),
+    "body_plan": LayerLegend(
+        title="Body plan",
+        description=("Population-weighted morphology.", "Bright = more differentiated form."),
+        colors=((10, 12, 18), (76, 120, 150), (230, 204, 125)),
+        labels=("simple", "formed", "complex"),
+    ),
 }
 
 
 class PlanetViewer:
-    """Small Pygame viewer for Phase 6 mobility/isolation proto-ecology maps."""
+    """Small Pygame viewer for Phase 7 morphology/body-plan proto-ecology maps."""
 
     layers: tuple[LayerName, ...] = (
         "biome",
@@ -259,6 +272,7 @@ class PlanetViewer:
         "biotic_pressure",
         "migration_pressure",
         "isolation_pressure",
+        "body_plan",
     )
 
     def __init__(self, planet: Planet, scale: int = 4, start_fullscreen: bool = True) -> None:
@@ -296,6 +310,7 @@ class PlanetViewer:
         self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_filter_button_rects: list[tuple[pygame.Rect, str]] = []
         self.event_log_modal_row_rects: list[tuple[pygame.Rect, int, tuple[int, int] | None]] = []
+        self.event_log_row_rects: list[tuple[pygame.Rect, int, tuple[int, int] | None]] = []
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_open = False
         self.life_tree_modal_rect = pygame.Rect(0, 0, 0, 0)
@@ -333,7 +348,7 @@ class PlanetViewer:
             self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
-        pygame.display.set_caption("Artificial Life Sandbox — Phase 6")
+        pygame.display.set_caption("Artificial Life Sandbox — Phase 7")
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
@@ -460,6 +475,14 @@ class PlanetViewer:
         if self.event_log_button_rect.collidepoint(pos):
             self.event_log_modal_open = True
             return
+
+        for rect, species_id, location in self.event_log_row_rects:
+            if rect.collidepoint(pos):
+                if self.planet.species_by_id(species_id) is not None:
+                    self.selected_species_id = species_id
+                    if location is not None:
+                        self.selected_cell = location
+                return
 
         for rect, section_key in self.section_header_rects:
             if rect.collidepoint(pos):
@@ -738,6 +761,7 @@ class PlanetViewer:
         self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_filter_button_rects = []
         self.event_log_modal_row_rects = []
+        self.event_log_row_rects = []
         self.life_tree_button_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.life_tree_modal_row_rects = []
@@ -757,7 +781,7 @@ class PlanetViewer:
             self._draw_setup_panel(x, y, content_w)
             return
 
-        self._draw_text("Phase 6 — Mobility & Isolation", x, y, self.font, (235, 238, 245))
+        self._draw_text("Phase 7 — Morphology & Body Plans", x, y, self.font, (235, 238, 245))
         y += 25
 
         y = self._draw_active_layer_header(x, y)
@@ -1231,8 +1255,20 @@ class PlanetViewer:
             y += 18
         else:
             for event in events:
-                text = f"t{event.tick}: {event.message}"
-                self._draw_text(self._clip_text(text, 52), x, y, self.tiny_font, self._event_kind_color(event.kind))
+                row_rect = pygame.Rect(x, y - 1, width, 15)
+                clickable = event.species_id is not None and self.planet.species_by_id(event.species_id) is not None
+                if clickable:
+                    self.event_log_row_rects.append((row_rect, int(event.species_id), event.location))
+                hovered = clickable and row_rect.collidepoint(pygame.mouse.get_pos())
+                if hovered:
+                    pygame.draw.rect(self.screen, (35, 43, 58), row_rect, border_radius=4)
+                    pygame.draw.rect(self.screen, (92, 110, 145), row_rect, 1, border_radius=4)
+
+                marker = "★ DESC " if event.kind == "branch" else ""
+                cursor = "↪ " if clickable else ""
+                text = f"{cursor}{marker}t{event.tick}: {event.message}"
+                max_chars = max(28, width // 7)
+                self._draw_text(self._clip_text(text, max_chars), x + (4 if clickable else 0), y, self.tiny_font, self._event_kind_color(event.kind))
                 y += 14
 
         y += 5
@@ -1254,13 +1290,19 @@ class PlanetViewer:
 
 
     def _draw_life_summary(self, x: int, y: int, width: int) -> int:
-        y = self._draw_section_title("Life summary", x, y, width, key="life")
-        if self._is_collapsed("life"):
+        branch_count = sum(1 for species in self.planet.species if species.parent_id is not None)
+        collapsed = self._is_collapsed("life")
+        title = "Life summary"
+        if collapsed:
+            title = f"Life summary · {self.planet.living_species_count} alive · {branch_count} branches"
+        y = self._draw_section_title(title, x, y, width, key="life")
+        if collapsed:
             return y
         y = self._draw_key_value_grid(
             (
                 ("living", f"{self.planet.living_species_count}"),
                 ("extinct", f"{self.planet.extinction_count}"),
+                ("branches", str(branch_count)),
                 ("biomass", f"{self.planet.total_biomass:.1f}"),
                 ("dead", f"{self.planet.total_dead_matter:.1f}"),
                 ("lineages", f"{len(self.planet.species)}/{self.planet.config.max_species}"),
@@ -1416,6 +1458,17 @@ class PlanetViewer:
             self._draw_text(f"strongest: x{sx} y{sy}", x, y, self.tiny_font, (165, 174, 196))
             y += 14
 
+        movement_label = observer_migration_label(summary.mean_migration_pressure)
+        isolation_label = observer_isolation_label(summary.mean_isolation_pressure)
+        self._draw_text(
+            self._clip_text(f"movement: {movement_label}   isolation: {isolation_label}", max(28, width // 7)),
+            x,
+            y,
+            self.tiny_font,
+            (182, 202, 226),
+        )
+        y += 14
+
         self._draw_text("Habitat summary", x, y, self.tiny_font, (220, 226, 240))
         y += 14
         y = self._draw_key_value_grid(
@@ -1438,7 +1491,7 @@ class PlanetViewer:
         )
         y += 4
 
-        self._draw_text("Traits", x, y, self.tiny_font, (220, 226, 240))
+        self._draw_text("Ecology traits", x, y, self.tiny_font, (220, 226, 240))
         y += 14
         traits = species.traits
         y = self._draw_key_value_grid(
@@ -1454,6 +1507,24 @@ class PlanetViewer:
                 ("mut", f"{traits.mutation_rate:.3f}"),
                 ("temp opt", f"{traits.temperature_optimum_c:.1f}"),
                 ("temp tol", f"{traits.temperature_tolerance_c:.1f}"),
+            ),
+            x,
+            y,
+            width,
+        )
+        y += 4
+        self._draw_text("Body plan", x, y, self.tiny_font, (220, 226, 240))
+        y += 14
+        y = self._draw_key_value_grid(
+            (
+                ("size", f"{traits.size:.2f}"),
+                ("structure", f"{traits.structure:.2f}"),
+                ("surface", f"{traits.surface_area:.2f}"),
+                ("armor", f"{traits.armor:.2f}"),
+                ("speed", f"{traits.speed:.2f}"),
+                ("long", f"{traits.longevity:.2f}"),
+                ("fragile", f"{traits.fragility:.2f}"),
+                ("complex", f"{traits.complexity:.2f}"),
             ),
             x,
             y,
@@ -1825,17 +1896,9 @@ class PlanetViewer:
                     scaled = pygame.transform.scale(surface, self.map_rect.size)
                     self.screen.blit(scaled, self.map_rect.topleft)
 
-        # Small readable label on the map itself. Keep it visible even after
-        # extinction so the current observer state never looks like it vanished.
-        suffix = " (extinct)" if species.is_extinct else ""
-        label = f"selected: {species.name}{suffix}"
-        text_color = EXTINCT_CRIMSON if species.is_extinct else (245, 248, 240)
-        border_color = EXTINCT_CRIMSON if species.is_extinct else species.color
-        text = self.small_font.render(label, True, text_color)
-        bg = pygame.Rect(self.map_rect.left + 12, self.map_rect.top + 12, text.get_width() + 14, text.get_height() + 8)
-        pygame.draw.rect(self.screen, (16, 20, 26), bg, border_radius=6)
-        pygame.draw.rect(self.screen, border_color, bg, 1, border_radius=6)
-        self.screen.blit(text, (bg.left + 7, bg.top + 4))
+        # Keep the map render clean: selected lineage state now lives in the
+        # observer panel/species card, not as UI text on top of the planet.
+
 
 
     def _globe_rotation(self) -> float:
@@ -1956,29 +2019,29 @@ class PlanetViewer:
         aura_color = (80, 210, 120, 42) if traits.photosynthesis >= traits.chemosynthesis else (180, 118, 255, 42)
         if traits.living_consumption > max(traits.photosynthesis, traits.chemosynthesis, traits.organic_absorption):
             aura_color = (255, 120, 90, 48)
-        pygame.draw.circle(surface, aura_color, (cx, cy), int(rect.width * (0.34 + 0.20 * traits.storage)))
+        pygame.draw.circle(surface, aura_color, (cx, cy), int(rect.width * (0.30 + 0.16 * traits.storage + 0.12 * traits.size + 0.10 * traits.surface_area)))
 
-        appendages = int(np.clip(2 + traits.dispersal * 7 + traits.living_consumption * 5 + traits.organic_absorption * 3, 2, 12))
-        appendage_len = int(rect.width * (0.18 + 0.18 * traits.dispersal + 0.08 * traits.organic_absorption))
+        appendages = int(np.clip(2 + traits.dispersal * 5 + traits.speed * 6 + traits.living_consumption * 5 + traits.organic_absorption * 3 + traits.complexity * 3, 2, 14))
+        appendage_len = int(rect.width * (0.16 + 0.14 * traits.dispersal + 0.14 * traits.speed + 0.06 * traits.surface_area))
         for i in range(appendages):
             angle = 2 * np.pi * (i / appendages) + float(rng.normal(0.0, 0.08))
-            inner = int(rect.width * (0.16 + 0.05 * traits.defense))
+            inner = int(rect.width * (0.14 + 0.06 * traits.structure + 0.05 * traits.size))
             x1 = cx + int(np.cos(angle) * inner)
             y1 = cy + int(np.sin(angle) * inner)
             x2 = cx + int(np.cos(angle) * (inner + appendage_len))
             y2 = cy + int(np.sin(angle) * (inner + appendage_len))
             limb_color = _lerp_color(base, (230, 240, 230), 0.28)
-            pygame.draw.line(surface, (*limb_color, 180), (x1, y1), (x2, y2), max(1, int(1 + traits.dispersal * 2)))
+            pygame.draw.line(surface, (*limb_color, 180), (x1, y1), (x2, y2), max(1, int(1 + traits.dispersal * 2 + traits.speed * 2)))
 
-        body_rx = int(rect.width * (0.17 + 0.09 * traits.storage + 0.08 * traits.defense))
-        body_ry = int(rect.height * (0.15 + 0.08 * traits.photosynthesis + 0.06 * traits.defense))
+        body_rx = int(rect.width * (0.14 + 0.12 * traits.size + 0.08 * traits.storage + 0.06 * traits.armor))
+        body_ry = int(rect.height * (0.13 + 0.10 * traits.structure + 0.08 * traits.surface_area + 0.05 * traits.armor))
         body_rect = pygame.Rect(cx - body_rx, cy - body_ry, body_rx * 2, body_ry * 2)
         body_color = _lerp_color(base, (235, 242, 228), 0.10 + 0.20 * traits.photosynthesis)
         pygame.draw.ellipse(surface, (*body_color, 232), body_rect)
         outline = EXTINCT_CRIMSON if species.is_extinct else _lerp_color(base, (255, 255, 255), 0.40)
-        pygame.draw.ellipse(surface, (*outline, 230), body_rect, max(1, int(1 + traits.defense * 4)))
+        pygame.draw.ellipse(surface, (*outline, 230), body_rect, max(1, int(1 + traits.defense * 3 + traits.armor * 4 + traits.structure * 2)))
 
-        spots = int(np.clip(2 + traits.chemosynthesis * 6 + traits.toxicity_tolerance * 4, 2, 10))
+        spots = int(np.clip(2 + traits.chemosynthesis * 5 + traits.toxicity_tolerance * 3 + traits.complexity * 4 + traits.fragility * 2, 2, 12))
         for _ in range(spots):
             px = int(cx + rng.normal(0, max(2, body_rx * 0.45)))
             py = int(cy + rng.normal(0, max(2, body_ry * 0.45)))
@@ -2345,6 +2408,53 @@ class PlanetViewer:
         print(f"Saved screenshot: {filename}")
 
 
+def observer_migration_label(value: float) -> str:
+    v = float(value)
+    if v >= 0.090:
+        return "active frontier"
+    if v >= 0.035:
+        return "drifting edge"
+    if v >= 0.010:
+        return "slow spread"
+    return "settled core"
+
+
+def observer_isolation_label(value: float) -> str:
+    v = float(value)
+    if v >= 0.090:
+        return "isolated branch-risk"
+    if v >= 0.035:
+        return "edge colony"
+    if v >= 0.010:
+        return "patchy range"
+    return "connected range"
+
+
+def _feather_horizontal_texture_seam(texture_rgb: np.ndarray, columns: int = 10) -> np.ndarray:
+    """Return a render-only texture with a softened equirectangular seam.
+
+    Terrain generation is not tileable yet, so when the 2D map is projected to
+    a globe the x=0/x=max boundary can appear as a perfectly straight meridian.
+    This feather is visual only: it blends a narrow band near both wrapped
+    edges so the 3D globe does not look like two pasted half-spheres.
+    """
+    h, w = texture_rgb.shape[:2]
+    band = int(min(max(0, columns), max(0, w // 2 - 1)))
+    if band <= 0:
+        return texture_rgb
+    out = texture_rgb.astype(np.float32, copy=True)
+    left_original = texture_rgb[:, :band].astype(np.float32)
+    right_original = texture_rgb[:, -band:].astype(np.float32)
+    for i in range(band):
+        t = (i + 1) / (band + 1)
+        # At the first/last rendered columns, lean toward the opposite edge;
+        # deeper into the band, preserve the local texture.
+        edge_blend = 1.0 - t
+        out[:, i] = left_original[:, i] * t + right_original[:, i] * edge_blend
+        out[:, w - band + i] = right_original[:, i] * t + left_original[:, i] * edge_blend
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def _lerp_color(low: Color, high: Color, t: float) -> Color:
     return tuple(int(a * (1.0 - t) + b * t) for a, b in zip(low, high))  # type: ignore[return-value]
 
@@ -2602,6 +2712,9 @@ def render_globe_texture(
 ) -> np.ndarray:
     """Project an equirectangular layer texture onto a rotating orthographic globe."""
     target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    # The planet fields are generated horizontally tileable. Do not feather the
+    # texture seam here: the old render-only blend created a visible straight
+    # meridian on otherwise coherent globes.
     tex_h, tex_w = texture_rgb.shape[:2]
     if star_rotation is None:
         out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
@@ -2625,10 +2738,19 @@ def render_globe_texture(
     lat = np.arcsin(np.clip(-ny, -1.0, 1.0))
     u = (lon / (2.0 * np.pi)) % 1.0
     v = np.clip(0.5 - lat / np.pi, 0.0, 0.999999)
-    src_x = np.clip((u * tex_w).astype(np.int32), 0, tex_w - 1)
-    src_y = np.clip((v * tex_h).astype(np.int32), 0, tex_h - 1)
-
-    sampled = texture_rgb[src_y, src_x].astype(np.float32)
+    xf = u * tex_w
+    yf = v * (tex_h - 1)
+    x0 = np.floor(xf).astype(np.int32) % tex_w
+    x1 = (x0 + 1) % tex_w
+    y0 = np.clip(np.floor(yf).astype(np.int32), 0, tex_h - 1)
+    y1 = np.clip(y0 + 1, 0, tex_h - 1)
+    tx = (xf - np.floor(xf))[..., None]
+    ty = (yf - np.floor(yf))[..., None]
+    c00 = texture_rgb[y0, x0].astype(np.float32)
+    c10 = texture_rgb[y0, x1].astype(np.float32)
+    c01 = texture_rgb[y1, x0].astype(np.float32)
+    c11 = texture_rgb[y1, x1].astype(np.float32)
+    sampled = (c00 * (1.0 - tx) + c10 * tx) * (1.0 - ty) + (c01 * (1.0 - tx) + c11 * tx) * ty
     light = np.clip(0.38 + 0.62 * (0.72 * nz + 0.20 * nx - 0.10 * ny), 0.20, 1.08)
     limb = np.clip((1.0 - r2) * 7.0, 0.0, 1.0)
     shaded = sampled * light[..., None]
@@ -2671,9 +2793,18 @@ def render_globe_scalar_overlay(
         lat = np.arcsin(np.clip(-ny, -1.0, 1.0))
         u = (lon / (2.0 * np.pi)) % 1.0
         v = np.clip(0.5 - lat / np.pi, 0.0, 0.999999)
-        src_x = np.clip((u * w).astype(np.int32), 0, w - 1)
-        src_y = np.clip((v * h).astype(np.int32), 0, h - 1)
-        sampled = np.clip(field[src_y, src_x], 0.0, 1.0)
+        xf = u * w
+        yf = v * (h - 1)
+        x0 = np.floor(xf).astype(np.int32) % w
+        x1 = (x0 + 1) % w
+        y0 = np.clip(np.floor(yf).astype(np.int32), 0, h - 1)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+        tx = xf - np.floor(xf)
+        ty = yf - np.floor(yf)
+        sampled = (field[y0, x0] * (1.0 - tx) + field[y0, x1] * tx) * (1.0 - ty) + (
+            field[y1, x0] * (1.0 - tx) + field[y1, x1] * tx
+        ) * ty
+        sampled = np.clip(sampled, 0.0, 1.0)
         alpha = np.clip(34 + 198 * np.sqrt(sampled / max(float(field.max()), 0.025)), 0, 226).astype(np.uint8)
         alpha[sampled <= 0.004] = 0
         rgba[..., :3] = np.array(color, dtype=np.uint8)
@@ -2853,6 +2984,8 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
         return _render_migration_pressure(planet)
     if layer == "isolation_pressure":
         return _render_isolation_pressure(planet)
+    if layer == "body_plan":
+        return _render_body_plan(planet)
     raise ValueError(f"Unknown layer: {layer}")
 
 
@@ -3015,6 +3148,14 @@ def _render_isolation_pressure(planet: Planet) -> np.ndarray:
     visible = np.clip(field / scale, 0.0, 1.0)
     return _three_color_gradient(visible, (12, 10, 18), (94, 70, 150), (255, 218, 92))
 
+def _render_body_plan(planet: Planet) -> np.ndarray:
+    field = np.clip(planet.morphology_index, 0.0, 1.0)
+    if float(planet.biomass.max()) <= 1e-7:
+        return _three_color_gradient(field, (10, 12, 18), (76, 120, 150), (230, 204, 125))
+    visible = np.clip(field * (0.35 + 0.95 * np.sqrt(np.clip(planet.biomass, 0.0, 1.0))), 0.0, 1.0)
+    return _three_color_gradient(visible, (10, 12, 18), (76, 120, 150), (230, 204, 125))
+
+
 def _render_dead_matter(planet: Planet) -> np.ndarray:
     # Dead matter is usually a thinner field than living biomass. The simulation
     # keeps raw values in [0, 1], but this view stretches current non-zero debris
@@ -3112,7 +3253,7 @@ def random_seed() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 5")
+    parser = argparse.ArgumentParser(description="Artificial Life Sandbox — Phase 7")
     parser.add_argument(
         "--seed",
         type=int,

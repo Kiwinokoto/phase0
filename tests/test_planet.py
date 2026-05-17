@@ -27,6 +27,7 @@ NORMALIZED_FIELD_NAMES = [
     "biotic_pressure",
     "migration_pressure",
     "isolation_pressure",
+    "morphology_index",
     "biomass",
     "diversity",
 ]
@@ -43,6 +44,7 @@ DYNAMIC_FIELD_NAMES = [
     "biotic_pressure",
     "migration_pressure",
     "isolation_pressure",
+    "morphology_index",
     "biomass",
     "diversity",
 ]
@@ -112,6 +114,31 @@ def test_generation_is_deterministic_for_same_seed():
     np.testing.assert_allclose(p1.temperature_c, p2.temperature_c)
     np.testing.assert_allclose(p1.populations, p2.populations)
 
+
+
+
+def test_static_maps_are_horizontally_seam_compatible():
+    planet = Planet.generate(PlanetConfig(width=160, height=80, seed=7171))
+
+    for name in ("elevation", "humidity", "minerals", "nutrient_source"):
+        field = getattr(planet, name).astype(np.float32)
+        seam_delta = float(np.mean(np.abs(field[:, 0] - field[:, -1])))
+        typical_delta = float(np.mean(np.abs(field[:, 1:] - field[:, :-1])))
+        assert seam_delta <= max(0.035, typical_delta * 3.5), name
+
+
+def test_globe_render_has_no_obvious_vertical_texture_join():
+    planet = Planet.generate(PlanetConfig(width=160, height=80, seed=8282))
+    texture = render_layer(planet, "biome")
+    globe = render_globe_texture(texture, (420, 300), rotation=0.0, seed=planet.config.seed)
+
+    h, w = globe.shape[:2]
+    cx = w // 2
+    center_band = globe[h // 5 : h - h // 5, cx - 1 : cx + 2].astype(np.float32)
+    neighbor_band = globe[h // 5 : h - h // 5, cx + 5 : cx + 8].astype(np.float32)
+    # This guards against the previous artificial meridian where the two
+    # rectangular-map edges looked pasted together as a straight center line.
+    assert float(np.mean(np.abs(center_band - neighbor_band))) < 55.0
 
 def test_regenerate_changes_seed():
     p1 = Planet.generate(PlanetConfig(width=96, height=48, seed=123))
@@ -596,6 +623,8 @@ def test_phase5_consumer_advantage_depends_on_available_living_biomass():
     prey_traits = LifeTraits(
         photosynthesis=0.8, chemosynthesis=0.1, organic_absorption=0.1,
         living_consumption=0.0, defense=0.05, storage=0.1,
+        size=0.22, structure=0.16, surface_area=0.62, armor=0.04,
+        speed=0.05, longevity=0.18, fragility=0.36, complexity=0.08,
         temperature_optimum_c=20.0, temperature_tolerance_c=30.0,
         water_preference=0.5, water_tolerance=0.8, toxicity_tolerance=1.0,
         reproduction_rate=0.9, metabolism_cost=0.04, dispersal=0.0, mutation_rate=0.01,
@@ -603,6 +632,8 @@ def test_phase5_consumer_advantage_depends_on_available_living_biomass():
     consumer_traits = LifeTraits(
         photosynthesis=0.0, chemosynthesis=0.0, organic_absorption=0.0,
         living_consumption=1.0, defense=0.1, storage=0.1,
+        size=0.30, structure=0.12, surface_area=0.28, armor=0.05,
+        speed=0.42, longevity=0.18, fragility=0.38, complexity=0.20,
         temperature_optimum_c=20.0, temperature_tolerance_c=30.0,
         water_preference=0.5, water_tolerance=0.8, toxicity_tolerance=1.0,
         reproduction_rate=1.1, metabolism_cost=0.04, dispersal=0.0, mutation_rate=0.01,
@@ -1020,6 +1051,14 @@ def test_specimen_keywords_are_trait_driven_observer_text():
             living_consumption=0.05,
             defense=0.72,
             storage=0.18,
+            size=0.30,
+            structure=0.32,
+            surface_area=0.72,
+            armor=0.95,
+            speed=0.12,
+            longevity=0.28,
+            fragility=0.20,
+            complexity=0.22,
             temperature_optimum_c=21.0,
             temperature_tolerance_c=15.0,
             water_preference=0.5,
@@ -1057,3 +1096,111 @@ def test_panel_width_modes_control_section_visibility_without_opening_window():
     assert "self.collapsed_sections = set(self.all_runtime_section_keys)" in source
     assert "self._draw_life_summary" in source
     assert "self._draw_current_layer_legend" in source
+
+
+def test_compact_event_log_click_selects_event_species_and_location():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=7172))
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    species_id = planet.species[0].id
+
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.selected_species_id = None
+    viewer.selected_cell = None
+    viewer.panel_collapsed = False
+    viewer.in_setup_screen = False
+    viewer.panel_tab_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.fullscreen_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.projection_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.life_overlay_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.weather_overlay_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.panel_layout_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.panel_hide_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.life_tree_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.genealogy_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.event_log_button_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.life_tree_modal_open = False
+    viewer.event_log_modal_open = False
+    viewer.genealogy_modal_species_id = None
+    viewer.section_header_rects = []
+    viewer.species_row_rects = []
+    viewer.map_rect = pygame.Rect(900, 900, 10, 10)
+    viewer.event_log_row_rects = [(pygame.Rect(10, 10, 120, 20), species_id, (int(x), int(y)))]
+
+    viewer._handle_mouse_click((15, 15))
+
+    assert viewer.selected_species_id == species_id
+    assert viewer.selected_cell == (int(x), int(y))
+
+
+def test_globe_texture_seam_feather_softens_wrapped_edges():
+    from alife.viewer import _feather_horizontal_texture_seam
+
+    texture = np.zeros((4, 20, 3), dtype=np.uint8)
+    texture[:, :10] = (255, 0, 0)
+    texture[:, 10:] = (0, 0, 255)
+
+    feathered = _feather_horizontal_texture_seam(texture, columns=4)
+
+    assert feathered.shape == texture.shape
+    assert not np.array_equal(feathered[:, 0], texture[:, 0])
+    assert not np.array_equal(feathered[:, -1], texture[:, -1])
+
+
+def test_phase6_final_observer_source_polish_markers():
+    source = inspect.getsource(PlanetViewer._draw_event_log) + inspect.getsource(PlanetViewer._draw_life_summary)
+
+    assert "★ DESC" in source
+    assert "event_log_row_rects" in source
+    assert "branches" in source
+
+
+def test_observer_migration_and_isolation_labels_are_readable():
+    from alife.viewer import observer_isolation_label, observer_migration_label
+
+    assert observer_migration_label(0.0) == "settled core"
+    assert "frontier" in observer_migration_label(0.2)
+    assert observer_isolation_label(0.0) == "connected range"
+    assert "branch" in observer_isolation_label(0.2)
+
+
+
+def test_phase7_morphology_traits_are_seeded_and_mutate_within_bounds():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=7374))
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    parent = planet.species[0]
+    planet.populations[0].fill(0.0)
+    planet._add_population_blob(0, int(y), int(x), amount=2.0, radius=4.0)
+    planet._create_mutant_species(0, int(y), int(x))
+    child = planet.species[1]
+
+    for traits in (parent.traits, child.traits):
+        for value in (
+            traits.size, traits.structure, traits.surface_area, traits.armor,
+            traits.speed, traits.longevity, traits.fragility, traits.complexity,
+        ):
+            assert 0.0 <= value <= 1.0
+    assert child.parent_id == parent.id
+
+
+def test_phase7_body_plan_layer_renders_population_weighted_morphology():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=7475, abiogenesis_rate=0.20, abiogenesis_fertility_threshold=0.20))
+    planet.step(600)
+    assert planet.total_biomass > 0.0
+    assert float(planet.morphology_index.min()) >= 0.0
+    assert float(planet.morphology_index.max()) <= 1.0
+
+    rgb = render_layer(planet, "body_plan")
+    assert rgb.shape == (32, 64, 3)
+    assert rgb.dtype == np.uint8
+
+
+def test_phase7_body_plan_source_markers_are_visible_to_observer():
+    source = inspect.getsource(PlanetViewer._draw_selected_lineage) + inspect.getsource(PlanetViewer._draw_species_specimen)
+
+    assert "Body plan" in source
+    assert "traits.size" in source
+    assert "traits.armor" in source
+    assert "traits.speed" in source

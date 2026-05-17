@@ -7,9 +7,9 @@ from dataclasses import dataclass
 class PlanetConfig:
     """Configuration for a generated 2D planet.
 
-    Phase 6 keeps proto-life abstract while adding mobility, colonization
-    pressure and isolation-driven branching. These are still traits and
-    population fields, not hard-coded plants/animals/predators.
+    Phase 7 keeps proto-life abstract while adding body-plan/morphology
+    tradeoffs. Lineages still remain population fields; morphology affects
+    costs, vulnerability, movement and resource capture, not individual agents.
     """
 
     width: int = 256
@@ -59,7 +59,7 @@ class PlanetConfig:
     volcanic_pulse_strength: float = 0.55
 
 
-    # Phase 6 proto-life. Populations are stored per lineage and per map cell;
+    # Phase 7 proto-life. Populations are stored per lineage and per map cell;
     # these are still abstract population fields, not individual organisms.
     max_species: int = 64
     abiogenesis_rate: float = 0.0060
@@ -93,6 +93,15 @@ class PlanetConfig:
     defense_metabolic_cost: float = 0.026
     storage_metabolic_cost: float = 0.018
     living_consumption_metabolic_cost: float = 0.034
+
+    # Phase 7 morphology/body-plan costs. These keep larger, faster or more
+    # protected body plans from becoming free upgrades.
+    size_metabolic_cost: float = 0.030
+    structure_metabolic_cost: float = 0.018
+    surface_area_metabolic_cost: float = 0.010
+    armor_metabolic_cost: float = 0.026
+    speed_metabolic_cost: float = 0.030
+    complexity_metabolic_cost: float = 0.024
 
     dead_matter_diffusion_rate: float = 0.012
     dead_matter_decay_rate: float = 0.0018
@@ -136,5 +145,7 @@ class PlanetConfig:
             raise ValueError("active_migration_rate must be >= 0.")
         if self.active_migration_cost < 0.0:
             raise ValueError("active_migration_cost must be >= 0.")
+        if self.size_metabolic_cost < 0.0 or self.armor_metabolic_cost < 0.0 or self.speed_metabolic_cost < 0.0:
+            raise ValueError("Phase 7 morphology costs must be >= 0.")
         if self.initial_speed < 1:
             raise ValueError("initial_speed must be >= 1.")
