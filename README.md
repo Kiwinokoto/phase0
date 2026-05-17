@@ -1,8 +1,8 @@
-# Artificial Life Sandbox — Phase 4
+# Artificial Life Sandbox — Phase 5
 
-Prototype Python minimal pour générer et observer une planète 2D avec proto-vie abstraite et contraintes écologiques.
+Prototype Python minimal pour générer et observer une planète 2D avec proto-vie abstraite et interactions écologiques.
 
-Phase 4 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle renforce plutôt le moteur d'évolution : la vie consomme des ressources pour croître et se maintenir, produit de la matière morte, subit la surpopulation locale, peut stagner, s'effondrer ou s'éteindre.
+Phase 5 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle enrichit plutôt les traits : certaines lignées peuvent extraire de l'énergie depuis la biomasse vivante, d'autres résistent mieux via défense/stockage, et la carte expose une nouvelle couche de pression biotique.
 
 
 ## Écran d’accueil / setup planète
@@ -111,6 +111,7 @@ dead_matter      matière morte/recyclée ; affichage auto-scalé pour être lis
 biomass          densité totale de proto-vie vivante
 diversity        coexistence locale de plusieurs lignées
 dominant_life    couleur de la lignée dominante + densité de biomasse
+biotic_pressure  pression locale de consommation de biomasse vivante
 ```
 
 ## Life overlay
@@ -125,7 +126,7 @@ Life: off       carte brute sans overlay
 
 L'overlay ne remplace pas les couches `biomass`, `diversity` ou `dominant_life` : il sert seulement à voir la biosphère directement sur la carte jolie/abiotique.
 
-## Logique Phase 4
+## Logique Phase 5
 
 La vie reste abstraite et populationnelle : une lignée n'est pas un individu, c'est un champ de population local.
 
@@ -135,6 +136,9 @@ Chaque lignée a des traits héritables :
 photosynthesis        capte lumière + nutriments
 chemosynthesis        exploite l'énergie chimique
 organic_absorption    exploite la matière morte
+living_consumption    extrait de l'énergie de biomasse vivante vulnérable
+defense               réduit la pression biotique subie
+storage               amortit famine/stress mais coûte à maintenir
 temperature_optimum   température préférée
 temperature_tolerance largeur de tolérance thermique
 water_preference      besoin en eau/humidité
@@ -157,7 +161,9 @@ mutation_rate         probabilité de branchement évolutif
 7. dead_matter recycle lentement des nutriments ;
 8. les populations se dispersent légèrement ;
 9. des branches mutantes apparaissent parfois ;
-10. les lignées trop faibles s'éteignent.
+10. une pression biotique locale apparaît quand des lignées exploitent d'autres biomasses ;
+11. défense et stockage réduisent une partie de cette pression ;
+12. les lignées trop faibles s'éteignent.
 ```
 
 ## Ce qu'il faut observer
@@ -171,10 +177,11 @@ biome + overlay voir la vie sur la carte principale
 dominant_life   quelle lignée domine localement
 diversity       où plusieurs lignées coexistent
 dead_matter     traces d'effondrement/recyclage
+biotic_pressure  zones où la vie exerce une pression sur la vie
 nutrients       ressources consommées puis recyclées
 ```
 
-La couche `dead_matter` peut rester sombre au tout début. En Phase 4 elle devient plus visible après les premiers crashs, extinctions locales ou zones de surpopulation. L'affichage est auto-scalé : une petite quantité de débris peut devenir visible même si la valeur brute reste faible.
+La couche `dead_matter` peut rester sombre au tout début. En Phase 5 elle devient plus visible après les premiers crashs, extinctions locales ou zones de surpopulation. L'affichage est auto-scalé : une petite quantité de débris peut devenir visible même si la valeur brute reste faible.
 
 ## Tests
 
@@ -198,6 +205,8 @@ Les tests vérifient notamment :
 - champs de vie bornés ;
 - production de matière morte après croissance/stress ;
 - population contrainte par les ressources ;
+- traits Phase 5 `living_consumption`, `defense`, `storage` ;
+- couche `biotic_pressure` visible lorsque la vie interagit avec la vie ;
 - évolution déterministe à seed et steps identiques ;
 - rendu d'intro géologique déterministe et sans effet sur la simulation.
 
@@ -274,6 +283,22 @@ The selected lineage card shows:
 ```
 
 This is still observational UI only: selecting or highlighting a lineage does not affect the simulation.
+
+## Phase 5 genealogy modal
+
+When a lineage card is open, the `Open genealogy tree` button opens a modal view for that lineage.
+
+It shows:
+
+```text
+- ancestral line from root lineage to the selected lineage
+- direct children count
+- total descendant count
+- descendant rows with indentation by generation
+- current biomass and creation tick for each visible row
+```
+
+Rows inside the modal are clickable: selecting another lineage recenters the modal on that lineage and updates the map highlight. `Esc`, the close button, or clicking outside the modal closes it. This is observational UI only; it does not affect simulation dynamics.
 
 
 ## Phase 4 setup screen patch

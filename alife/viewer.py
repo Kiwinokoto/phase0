@@ -14,7 +14,7 @@ LayerName = str
 OverlayMode = str
 Color = tuple[int, int, int]
 
-LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life")
+LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life", "biotic_pressure")
 LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
 
 
@@ -172,11 +172,17 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
         colors=((8, 10, 12), (95, 160, 120), (240, 240, 180)),
         labels=("barren", "lineage", "dense"),
     ),
+    "biotic_pressure": LayerLegend(
+        title="Biotic pressure",
+        description=("Life-on-life consumption pressure.", "Phase 5 ecological interaction field."),
+        colors=((10, 12, 18), (110, 54, 85), (245, 118, 70)),
+        labels=("quiet", "pressure", "intense"),
+    ),
 }
 
 
 class PlanetViewer:
-    """Small Pygame viewer for Phase 4 constrained proto-ecology maps."""
+    """Small Pygame viewer for Phase 5 richer proto-ecology maps."""
 
     layers: tuple[LayerName, ...] = (
         "biome",
@@ -195,6 +201,7 @@ class PlanetViewer:
         "biomass",
         "diversity",
         "dominant_life",
+        "biotic_pressure",
     )
 
     def __init__(self, planet: Planet, scale: int = 4, start_fullscreen: bool = True) -> None:
@@ -215,6 +222,11 @@ class PlanetViewer:
         self.selected_species_id: int | None = None
         self.selected_radius = 5
         self.species_row_rects: list[tuple[pygame.Rect, int]] = []
+        self.genealogy_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.genealogy_modal_species_id: int | None = None
+        self.genealogy_modal_rect = pygame.Rect(0, 0, 0, 0)
+        self.genealogy_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.genealogy_modal_row_rects: list[tuple[pygame.Rect, int]] = []
         self.setup_control_rects: list[tuple[pygame.Rect, str, str]] = []
         self.setup_slider_rects: list[tuple[pygame.Rect, str]] = []
         self.active_setup_slider: tuple[str, pygame.Rect] | None = None
@@ -234,7 +246,7 @@ class PlanetViewer:
             self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
             self.screen = pygame.display.set_mode(self.windowed_size, pygame.RESIZABLE)
-        pygame.display.set_caption("Artificial Life Sandbox — Phase 4")
+        pygame.display.set_caption("Artificial Life Sandbox — Phase 5")
         self.map_rect = pygame.Rect(0, 0, *self.base_map_size)
         self.panel_rect = pygame.Rect(self.base_map_size[0], 0, self.side_panel_width, self.base_map_size[1])
         self.fullscreen_button_rect = pygame.Rect(0, 0, 0, 0)
@@ -288,6 +300,10 @@ class PlanetViewer:
         pygame.quit()
 
     def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
+        if self.genealogy_modal_species_id is not None:
+            self._handle_genealogy_modal_click(pos)
+            return
+
         if self.fullscreen_button_rect.collidepoint(pos):
             self._toggle_fullscreen()
             return
@@ -308,6 +324,10 @@ class PlanetViewer:
             self._cycle_life_overlay()
             return
 
+        if self.genealogy_button_rect.collidepoint(pos) and self.selected_species_id is not None:
+            self.genealogy_modal_species_id = self.selected_species_id
+            return
+
         for rect, section_key in self.section_header_rects:
             if rect.collidepoint(pos):
                 self._toggle_section(section_key)
@@ -323,7 +343,25 @@ class PlanetViewer:
             if cell is not None:
                 self.selected_cell = cell
 
+    def _handle_genealogy_modal_click(self, pos: tuple[int, int]) -> None:
+        if self.genealogy_modal_close_rect.collidepoint(pos):
+            self.genealogy_modal_species_id = None
+            return
+
+        for rect, species_id in self.genealogy_modal_row_rects:
+            if rect.collidepoint(pos):
+                self.selected_species_id = species_id
+                self.genealogy_modal_species_id = species_id
+                return
+
+        # Click outside the modal to close it.
+        if not self.genealogy_modal_rect.collidepoint(pos):
+            self.genealogy_modal_species_id = None
+
     def _handle_key(self, key: int) -> bool:
+        if self.genealogy_modal_species_id is not None and key == pygame.K_ESCAPE:
+            self.genealogy_modal_species_id = None
+            return True
         if key in (pygame.K_ESCAPE, pygame.K_q):
             return False
         if self.in_setup_screen:
@@ -409,6 +447,8 @@ class PlanetViewer:
             self._draw_selected_species_distribution()
             self._draw_selection_marker()
         self._draw_panel()
+        if self.genealogy_modal_species_id is not None:
+            self._draw_genealogy_modal()
 
     def _get_map_surface(self) -> pygame.Surface:
         layer = "biome" if self.in_setup_screen else self.current_layer
@@ -442,6 +482,9 @@ class PlanetViewer:
         pygame.draw.line(self.screen, (70, 76, 96), panel.topleft, panel.bottomleft, 1)
 
         self.species_row_rects = []
+        self.genealogy_modal_row_rects = []
+        self.genealogy_button_rect = pygame.Rect(0, 0, 0, 0)
+        self.genealogy_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.setup_control_rects = []
         self.setup_slider_rects = []
         self.section_header_rects = []
@@ -454,7 +497,7 @@ class PlanetViewer:
             self._draw_setup_panel(x, y, content_w)
             return
 
-        self._draw_text("Phase 4 — Constrained Ecology", x, y, self.font, (235, 238, 245))
+        self._draw_text("Phase 5 — Richer Ecology", x, y, self.font, (235, 238, 245))
         y += 25
 
         y = self._draw_active_layer_header(x, y)
@@ -909,6 +952,7 @@ class PlanetViewer:
                 ("dead", f"{self.planet.total_dead_matter:.1f}"),
                 ("lineages", f"{len(self.planet.species)}/{self.planet.config.max_species}"),
                 ("max bio", f"{self.planet.biomass.max():.3f}"),
+                ("biotic", f"{self.planet.biotic_pressure.mean():.3f}"),
             ),
             x,
             y,
@@ -964,6 +1008,7 @@ class PlanetViewer:
                 ("fert", f"{self.planet.fertility[cell_y, cell_x]:.2f}"),
                 ("tox", f"{self.planet.toxicity[cell_y, cell_x]:.2f}"),
                 ("dead", f"{self.planet.dead_matter[cell_y, cell_x]:.3f}"),
+                ("biotic", f"{self.planet.biotic_pressure[cell_y, cell_x]:.3f}"),
             ),
             x,
             y,
@@ -1051,6 +1096,7 @@ class PlanetViewer:
                 ("nutr", f"{summary.mean_nutrients:.2f}"),
                 ("chem", f"{summary.mean_chemical_energy:.2f}"),
                 ("dead", f"{summary.mean_dead_matter:.3f}"),
+                ("biotic", f"{summary.mean_biotic_pressure:.3f}"),
                 ("light", f"{summary.mean_light:.2f}"),
             ),
             x,
@@ -1067,6 +1113,9 @@ class PlanetViewer:
                 ("photo", f"{traits.photosynthesis:.2f}"),
                 ("chemo", f"{traits.chemosynthesis:.2f}"),
                 ("detrit", f"{traits.organic_absorption:.2f}"),
+                ("living", f"{traits.living_consumption:.2f}"),
+                ("def", f"{traits.defense:.2f}"),
+                ("storage", f"{traits.storage:.2f}"),
                 ("disp", f"{traits.dispersal:.2f}"),
                 ("tox tol", f"{traits.toxicity_tolerance:.2f}"),
                 ("mut", f"{traits.mutation_rate:.3f}"),
@@ -1077,7 +1126,10 @@ class PlanetViewer:
             y,
             width,
         )
-        return y
+        y += 8
+        self.genealogy_button_rect = pygame.Rect(x, y, width, 26)
+        self._draw_button(self.genealogy_button_rect, "Open genealogy tree")
+        return y + 32
 
     def _draw_species_row(self, species, label: str, x: int, y: int, width: int) -> int:
         row_h = 16
@@ -1096,6 +1148,161 @@ class PlanetViewer:
         pygame.draw.rect(self.screen, (90, 96, 116), color_rect, 1)
         text_color = (234, 242, 235) if selected else (190, 199, 218)
         self._draw_text(self._clip_text(label, 49), x + 18, y, self.tiny_font, text_color)
+        return y + row_h
+
+    def _draw_genealogy_modal(self) -> None:
+        species = self.planet.species_by_id(self.genealogy_modal_species_id)
+        if species is None:
+            self.genealogy_modal_species_id = None
+            return
+
+        self.genealogy_modal_row_rects = []
+        screen_w, screen_h = self.screen.get_size()
+        overlay = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
+        overlay.fill((3, 5, 10, 168))
+        self.screen.blit(overlay, (0, 0))
+
+        modal_w = min(920, screen_w - 90)
+        modal_h = min(660, screen_h - 86)
+        modal_w = max(520, modal_w)
+        modal_h = max(420, modal_h)
+        modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
+        self.genealogy_modal_rect = modal
+
+        pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
+        pygame.draw.rect(self.screen, species.color, modal, 1, border_radius=12)
+        pygame.draw.rect(self.screen, (74, 84, 112), modal.inflate(-2, -2), 1, border_radius=11)
+
+        x = modal.left + 22
+        y = modal.top + 18
+        width = modal.width - 44
+        close_rect = pygame.Rect(modal.right - 40, modal.top + 14, 24, 24)
+        self.genealogy_modal_close_rect = close_rect
+        self._draw_button(close_rect, "×")
+
+        pygame.draw.rect(self.screen, species.color, pygame.Rect(x, y + 4, 14, 14))
+        pygame.draw.rect(self.screen, (110, 118, 140), pygame.Rect(x, y + 4, 14, 14), 1)
+        self._draw_text("Genealogy tree", x + 22, y, self.font, (238, 243, 252))
+        status = "extinct" if species.is_extinct else "living"
+        self._draw_text(
+            self._clip_text(f"{species.name} — {self.planet.species_strategy_label(species)} — {status}", 86),
+            x + 22,
+            y + 21,
+            self.tiny_font,
+            (178, 188, 210),
+        )
+        y += 54
+
+        ancestors = self.planet.lineage_ancestors(species.id, include_self=True)
+        descendants = self.planet.lineage_descendants(species.id)
+        direct_children = self.planet.lineage_children(species.id)
+
+        summary_pairs = (
+            ("ancestors", str(max(0, len(ancestors) - 1))),
+            ("children", str(len(direct_children))),
+            ("desc", str(len(descendants))),
+            ("created", f"t{species.created_tick}"),
+            ("peak", f"{species.population_peak:.1f}"),
+            ("current", f"{self.planet.species_total_population(species.id):.1f}"),
+        )
+        y = self._draw_key_value_grid(summary_pairs, x, y, width, columns=3)
+        y += 16
+
+        col_gap = 18
+        left_w = max(210, int(width * 0.35))
+        right_w = width - left_w - col_gap
+        left_x = x
+        right_x = x + left_w + col_gap
+        content_bottom = modal.bottom - 48
+
+        self._draw_text("Ancestral line", left_x, y, self.small_font, (230, 236, 248))
+        self._draw_text("Descendants", right_x, y, self.small_font, (230, 236, 248))
+        y0 = y + 22
+
+        ay = y0
+        if not ancestors:
+            self._draw_text("No ancestry data.", left_x, ay, self.tiny_font, (150, 160, 184))
+        else:
+            for index, ancestor in enumerate(ancestors):
+                if ay > content_bottom - 18:
+                    self._draw_text("…", left_x, ay, self.tiny_font, (150, 160, 184))
+                    break
+                connector = "└─" if index == len(ancestors) - 1 else "├─"
+                depth = max(0, index)
+                ay = self._draw_genealogy_row(
+                    ancestor,
+                    f"{connector} {ancestor.name}",
+                    left_x,
+                    ay,
+                    left_w,
+                    depth=min(depth, 5),
+                    selected=ancestor.id == species.id,
+                )
+
+        dy = y0
+        if not descendants:
+            self._draw_text("No descendants yet.", right_x, dy, self.tiny_font, (150, 160, 184))
+            dy += 16
+        else:
+            max_rows = max(8, (content_bottom - dy) // 18)
+            visible = descendants[:max_rows]
+            for depth, child in visible:
+                prefix = "└─" if depth == 1 else "↳"
+                label = f"{prefix} {child.name}"
+                dy = self._draw_genealogy_row(
+                    child,
+                    label,
+                    right_x,
+                    dy,
+                    right_w,
+                    depth=min(depth - 1, 7),
+                    selected=child.id == self.selected_species_id,
+                )
+            remaining = len(descendants) - len(visible)
+            if remaining > 0 and dy <= content_bottom - 14:
+                self._draw_text(f"… {remaining} more descendants", right_x, dy, self.tiny_font, (150, 160, 184))
+                dy += 16
+
+        footer_y = modal.bottom - 32
+        self._draw_text(
+            "Click a lineage row to inspect it. Esc or outside click closes this tree.",
+            x,
+            footer_y,
+            self.tiny_font,
+            (155, 166, 190),
+        )
+
+    def _draw_genealogy_row(
+        self,
+        species,
+        label: str,
+        x: int,
+        y: int,
+        width: int,
+        *,
+        depth: int = 0,
+        selected: bool = False,
+    ) -> int:
+        row_h = 18
+        indent = min(86, max(0, depth) * 14)
+        rect = pygame.Rect(x, y, width, row_h)
+        self.genealogy_modal_row_rects.append((rect, species.id))
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        if selected or hovered:
+            fill = (45, 56, 76) if selected else (30, 36, 50)
+            border = (135, 176, 150) if selected else (72, 84, 108)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=5)
+            pygame.draw.rect(self.screen, border, rect, 1, border_radius=5)
+
+        swatch = pygame.Rect(x + 5 + indent, y + 4, 10, 10)
+        pygame.draw.rect(self.screen, species.color, swatch)
+        pygame.draw.rect(self.screen, (92, 100, 122), swatch, 1)
+        total = self.planet.species_total_population(species.id)
+        extinct = "† " if species.is_extinct else ""
+        text = f"{extinct}{label}  t{species.created_tick}  {total:.1f}"
+        color = (235, 242, 236) if selected else (190, 200, 220)
+        max_chars = max(12, (width - indent - 22) // 7)
+        self._draw_text(self._clip_text(text, max_chars), x + 20 + indent, y + 2, self.tiny_font, color)
         return y + row_h
 
     def _draw_selected_species_distribution(self) -> None:
@@ -1486,7 +1693,20 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
         return _three_color_gradient(planet.diversity, (16, 14, 26), (60, 105, 160), (230, 210, 110))
     if layer == "dominant_life":
         return _render_dominant_life(planet)
+    if layer == "biotic_pressure":
+        return _render_biotic_pressure(planet)
     raise ValueError(f"Unknown layer: {layer}")
+
+
+def _render_biotic_pressure(planet: Planet) -> np.ndarray:
+    field = np.clip(planet.biotic_pressure, 0.0, 1.0)
+    if float(field.max()) <= 1e-7:
+        return _three_color_gradient(field, (10, 12, 18), (110, 54, 85), (245, 118, 70))
+    nonzero = field[field > 1e-7]
+    scale = float(np.quantile(nonzero, 0.985)) if nonzero.size else float(field.max())
+    scale = max(scale, 0.025)
+    visible = np.clip(field / scale, 0.0, 1.0)
+    return _three_color_gradient(visible, (10, 12, 18), (110, 54, 85), (245, 118, 70))
 
 def _render_dead_matter(planet: Planet) -> np.ndarray:
     # Dead matter is usually a thinner field than living biomass. The simulation

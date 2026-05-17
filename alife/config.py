@@ -7,9 +7,10 @@ from dataclasses import dataclass
 class PlanetConfig:
     """Configuration for a generated 2D planet.
 
-    Phase 4 turns the first proto-life into a more constrained ecology:
-    populations consume maintenance resources, produce dead matter through
-    turnover, and are limited by local carrying capacity.
+    Phase 5 keeps proto-life abstract while adding richer ecological roles:
+    lineages may extract energy from living biomass, resist that pressure, or
+    buffer hard periods with storage. These are still traits, not hard-coded
+    plants/animals/predators.
     """
 
     width: int = 256
@@ -59,7 +60,7 @@ class PlanetConfig:
     volcanic_pulse_strength: float = 0.55
 
 
-    # Phase 4 proto-life. Populations are stored per lineage and per map cell;
+    # Phase 5 proto-life. Populations are stored per lineage and per map cell;
     # these are still abstract population fields, not individual organisms.
     max_species: int = 64
     abiogenesis_rate: float = 0.0060
@@ -73,6 +74,16 @@ class PlanetConfig:
     life_maintenance_consumption_rate: float = 0.0016
     life_turnover_rate: float = 0.0018
     life_dispersal_rate: float = 0.018
+
+    # Phase 5 life-on-life pressure. Consumers gain energy from neighboring
+    # biomass fields; prey lineages resist via defense/storage. This remains a
+    # population-level ecological pressure, not individual hunting behavior.
+    living_consumption_energy_weight: float = 0.74
+    biotic_pressure_rate: float = 0.018
+    biotic_pressure_decay_rate: float = 0.10
+    defense_metabolic_cost: float = 0.026
+    storage_metabolic_cost: float = 0.018
+    living_consumption_metabolic_cost: float = 0.034
 
     dead_matter_diffusion_rate: float = 0.012
     dead_matter_decay_rate: float = 0.0018
@@ -108,5 +119,7 @@ class PlanetConfig:
             raise ValueError("life_maintenance_consumption_rate must be >= 0.")
         if self.life_turnover_rate < 0.0:
             raise ValueError("life_turnover_rate must be >= 0.")
+        if self.biotic_pressure_rate < 0.0:
+            raise ValueError("biotic_pressure_rate must be >= 0.")
         if self.initial_speed < 1:
             raise ValueError("initial_speed must be >= 1.")

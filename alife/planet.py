@@ -49,12 +49,13 @@ class LineageHabitatSummary:
     mean_nutrients: float
     mean_chemical_energy: float
     mean_dead_matter: float
+    mean_biotic_pressure: float
     mean_light: float
     land_share: float
 
 @dataclass
 class Planet:
-    """Generated 2D planet fields for Phase 4.
+    """Generated 2D planet fields for Phase 5.
 
     Field shapes are always (height, width). Values are normalized to [0, 1]
     except temperature_c. Phase 4 keeps proto-life abstract, but adds stronger
@@ -82,6 +83,7 @@ class Planet:
     toxicity: np.ndarray
     fertility: np.ndarray
     dead_matter: np.ndarray
+    biotic_pressure: np.ndarray
     populations: np.ndarray
     biomass: np.ndarray
     diversity: np.ndarray
@@ -125,6 +127,7 @@ class Planet:
             toxicity=toxicity,
         )
         dead_matter = np.zeros_like(fertility, dtype=np.float32)
+        biotic_pressure = np.zeros_like(fertility, dtype=np.float32)
         populations = np.zeros((config.max_species, config.height, config.width), dtype=np.float32)
         biomass = np.zeros_like(fertility, dtype=np.float32)
         diversity = np.zeros_like(fertility, dtype=np.float32)
@@ -151,6 +154,7 @@ class Planet:
             toxicity=toxicity,
             fertility=fertility,
             dead_matter=dead_matter,
+            biotic_pressure=biotic_pressure,
             populations=populations,
             biomass=biomass,
             diversity=diversity,
@@ -228,18 +232,59 @@ class Planet:
 
     def descendant_count(self, species_id: int) -> int:
         """Return the number of direct and indirect descendant lineages."""
-        descendants = 0
-        frontier = {int(species_id)}
-        seen: set[int] = set()
-        while frontier:
-            parent_id = frontier.pop()
-            if parent_id in seen:
+        return len(self.lineage_descendants(species_id))
+
+    def lineage_ancestors(self, species_id: int, *, include_self: bool = False) -> list[LifeSpecies]:
+        """Return the direct ancestor chain from root to parent/self.
+
+        This is observer/UI data only. It lets the viewer explain where a
+        selected lineage came from without changing simulation dynamics.
+        """
+        current = self.species_by_id(species_id)
+        if current is None:
+            return []
+
+        chain: list[LifeSpecies] = [current] if include_self else []
+        seen: set[int] = {current.id}
+        parent_id = current.parent_id
+        while parent_id is not None:
+            parent = self.species_by_id(parent_id)
+            if parent is None or parent.id in seen:
+                break
+            chain.append(parent)
+            seen.add(parent.id)
+            parent_id = parent.parent_id
+        chain.reverse()
+        return chain
+
+    def lineage_children(self, species_id: int) -> list[LifeSpecies]:
+        """Return direct child lineages ordered by creation time."""
+        parent_id = int(species_id)
+        children = [species for species in self.species if species.parent_id == parent_id]
+        children.sort(key=lambda species: (species.created_tick, species.id))
+        return children
+
+    def lineage_descendants(self, species_id: int, *, max_depth: int | None = None) -> list[tuple[int, LifeSpecies]]:
+        """Return descendant lineages as ``(depth, species)`` rows.
+
+        Depth is 1 for direct children. The order is stable and chronological
+        within each branch, which keeps the genealogy modal readable.
+        """
+        root_id = int(species_id)
+        rows: list[tuple[int, LifeSpecies]] = []
+        stack = [(1, child) for child in reversed(self.lineage_children(root_id))]
+        seen: set[int] = {root_id}
+        while stack:
+            depth, species = stack.pop()
+            if species.id in seen:
                 continue
-            seen.add(parent_id)
-            children = {species.id for species in self.species if species.parent_id == parent_id}
-            descendants += len(children)
-            frontier.update(children)
-        return descendants
+            seen.add(species.id)
+            rows.append((depth, species))
+            if max_depth is not None and depth >= max_depth:
+                continue
+            children = self.lineage_children(species.id)
+            stack.extend((depth + 1, child) for child in reversed(children))
+        return rows
 
     def lineage_habitat_summary(self, species_id: int, threshold: float = 0.005) -> LineageHabitatSummary:
         """Compute a compact habitat card for a lineage.
@@ -274,6 +319,7 @@ class Planet:
         mean_nutrients = weighted_mean(self.nutrients)
         mean_chemical_energy = weighted_mean(self.chemical_energy)
         mean_dead_matter = weighted_mean(self.dead_matter)
+        mean_biotic_pressure = weighted_mean(self.biotic_pressure)
         mean_light = weighted_mean(self.light)
         main_habitat = _infer_habitat_label(
             land_share=land_share,
@@ -295,6 +341,7 @@ class Planet:
             mean_nutrients=mean_nutrients,
             mean_chemical_energy=mean_chemical_energy,
             mean_dead_matter=mean_dead_matter,
+            mean_biotic_pressure=mean_biotic_pressure,
             mean_light=mean_light,
             land_share=land_share,
         )
@@ -522,16 +569,28 @@ class Planet:
 
     def _update_life(self, steps: int) -> None:
         if not self.species:
+            self.biotic_pressure *= _decay_factor(self.config.biotic_pressure_decay_rate, steps)
             return
 
         # Keep large fast-forward steps stable without doing one Python loop per tick.
         chunks = max(1, min(48, int(np.ceil(steps / 32))))
         dt = max(1.0, float(steps) / float(chunks))
+        phase5_pressure = np.zeros_like(self.biotic_pressure, dtype=np.float32)
+
         for _ in range(chunks):
             self._update_dead_matter(dt)
             water_access = self._water_access()
-            biomass_before = np.clip(self.populations[: len(self.species)].sum(axis=0), 0.0, 1.0)
+            active_count = len(self.species)
+            active_populations = self.populations[:active_count]
+            biomass_before = np.clip(active_populations.sum(axis=0), 0.0, 1.0).astype(np.float32)
+            defense_biomass = np.zeros_like(biomass_before, dtype=np.float32)
+            consumer_pressure = np.zeros_like(biomass_before, dtype=np.float32)
 
+            for idx, sp in enumerate(self.species):
+                if not sp.is_extinct:
+                    defense_biomass += (active_populations[idx] * sp.traits.defense).astype(np.float32)
+
+            updated_indices: list[int] = []
             for index, species in enumerate(self.species):
                 if species.is_extinct:
                     continue
@@ -551,33 +610,57 @@ class Planet:
                 tox_fit = np.clip(1.0 - tox_over / max(1.0 - traits.toxicity_tolerance, 0.05), 0.0, 1.0)
                 habitat_fit = temp_fit * water_fit * tox_fit
 
+                other_biomass = np.clip(biomass_before - pop, 0.0, 1.0)
+                other_defense = np.divide(
+                    np.maximum(0.0, defense_biomass - pop * traits.defense),
+                    np.maximum(other_biomass, 1e-6),
+                    out=np.zeros_like(other_biomass, dtype=np.float32),
+                    where=other_biomass > 1e-6,
+                )
+                prey_vulnerability = np.clip(1.0 - other_defense, 0.0, 1.0)
+                living_energy = (
+                    self.config.living_consumption_energy_weight
+                    * traits.living_consumption
+                    * other_biomass
+                    * prey_vulnerability
+                    * (0.28 + 0.72 * habitat_fit)
+                )
+
                 photo_energy = traits.photosynthesis * self.light * self.nutrients * water_fit
                 chemo_energy = traits.chemosynthesis * self.chemical_energy * (0.25 + 0.75 * self.minerals)
                 organic_energy = traits.organic_absorption * self.dead_matter
-                energy_gain = photo_energy + chemo_energy + organic_energy
+                energy_gain = photo_energy + chemo_energy + organic_energy + living_energy
 
-                # Phase 4: life is no longer only "growth minus generic crowding".
-                # Each cell has a rough carrying capacity derived from current
-                # fertility and usable energy. Dense mats in poor cells now crash,
-                # which produces visible dead matter and frees nutrients again.
+                trait_cost = (
+                    self.config.living_consumption_metabolic_cost * traits.living_consumption
+                    + self.config.defense_metabolic_cost * traits.defense
+                    + self.config.storage_metabolic_cost * traits.storage
+                )
+                effective_metabolism = traits.metabolism_cost + trait_cost
+                storage_buffer = 0.35 * traits.storage
+
+                # Phase 5: life is now limited by environmental capacity and by
+                # other life. Defensive/storage traits cost energy but reduce
+                # crashes; living-biomass extraction adds energy only where other
+                # biomass already exists and is vulnerable.
                 local_capacity = np.clip(
-                    0.02 + 0.72 * self.fertility + 0.26 * energy_gain * habitat_fit,
+                    0.02 + 0.68 * self.fertility + 0.26 * energy_gain * habitat_fit + 0.04 * traits.storage,
                     0.015,
                     1.0,
                 )
                 over_capacity = np.maximum(0.0, biomass_before - local_capacity)
 
-                growth = traits.reproduction_rate * energy_gain * habitat_fit
+                growth = traits.reproduction_rate * energy_gain * habitat_fit * (1.0 - 0.18 * traits.storage)
                 stress = self.config.life_stress_rate * (1.0 - habitat_fit)
-                starvation = np.maximum(0.0, traits.metabolism_cost - 0.55 * energy_gain * habitat_fit)
+                starvation = np.maximum(0.0, effective_metabolism - (0.55 + storage_buffer) * energy_gain * habitat_fit)
                 crowding = self.config.life_crowding_rate * over_capacity
-                net = growth - traits.metabolism_cost - stress - starvation - crowding
+                net = growth - effective_metabolism - stress - starvation - crowding
 
                 multiplier = np.exp(np.clip(net * dt * self.config.life_time_scale, -0.95, 0.42))
                 updated = np.clip(pop * multiplier, 0.0, 1.0).astype(np.float32)
 
                 turnover_pressure = np.clip(
-                    0.35 + 2.50 * stress + 2.10 * starvation + 1.40 * crowding,
+                    (0.35 + 2.50 * stress + 2.10 * starvation + 1.40 * crowding) * (1.0 - 0.28 * traits.storage),
                     0.0,
                     7.0,
                 )
@@ -599,14 +682,43 @@ class Planet:
                 growth_use = self.config.life_resource_consumption_rate * growth_amount
                 maintenance_use = self.config.life_maintenance_consumption_rate * dt * updated
                 resource_use = growth_use + maintenance_use
-                self.nutrients -= resource_use * (0.62 * traits.photosynthesis + 0.32 * traits.organic_absorption + 0.08)
-                self.chemical_energy -= resource_use * (0.90 * traits.chemosynthesis)
-                self.dead_matter -= resource_use * (0.60 * traits.organic_absorption)
+                self.nutrients -= resource_use * (0.60 * traits.photosynthesis + 0.30 * traits.organic_absorption + 0.05 * traits.defense + 0.08)
+                self.chemical_energy -= resource_use * (0.88 * traits.chemosynthesis)
+                self.dead_matter -= resource_use * (0.58 * traits.organic_absorption)
+
+                # Consumers create local ecological pressure. The loss is applied
+                # to all vulnerable populations after the main growth pass so the
+                # update stays order-independent enough for deterministic runs.
+                consumer_pressure += (
+                    updated
+                    * traits.living_consumption
+                    * (0.20 + 0.80 * habitat_fit)
+                    * (0.45 + 0.55 * traits.dispersal)
+                ).astype(np.float32)
 
                 updated[updated < 1e-5] = 0.0
                 self.populations[index] = np.clip(updated, 0.0, 1.0).astype(np.float32)
+                updated_indices.append(index)
                 species.population_peak = max(species.population_peak, float(self.populations[index].sum()))
-                self._mark_extinct_if_needed(index)
+
+            if updated_indices:
+                biomass_after_growth = np.clip(self.populations[:active_count].sum(axis=0), 0.0, 1.0)
+                if float(consumer_pressure.max()) > 0.0 and float(biomass_after_growth.max()) > 0.0:
+                    pressure_norm = np.clip(consumer_pressure / np.maximum(0.10, biomass_after_growth), 0.0, 4.0)
+                    for index in updated_indices:
+                        species = self.species[index]
+                        traits = species.traits
+                        pop = self.populations[index]
+                        vulnerability = np.clip((1.0 - traits.defense) * (1.0 - 0.32 * traits.storage), 0.0, 1.0)
+                        loss_fraction = 1.0 - np.exp(-self.config.biotic_pressure_rate * dt * pressure_norm * vulnerability)
+                        losses = np.minimum(pop, pop * loss_fraction).astype(np.float32)
+                        if float(losses.max()) > 0.0:
+                            self.populations[index] = np.maximum(pop - losses, 0.0).astype(np.float32)
+                            self.dead_matter += (0.24 * losses).astype(np.float32)
+                            species.population_peak = max(species.population_peak, float(self.populations[index].sum()))
+                        self._mark_extinct_if_needed(index)
+
+                phase5_pressure = np.maximum(phase5_pressure, np.clip(consumer_pressure, 0.0, 1.0).astype(np.float32))
 
             # During fast-forward, abiotic recharge must continue while life consumes
             # resources; otherwise one macro-step lets populations strip the map
@@ -627,6 +739,11 @@ class Planet:
             self.nutrients = np.clip(self.nutrients, 0.0, 1.0).astype(np.float32)
             self.chemical_energy = np.clip(self.chemical_energy, 0.0, 1.0).astype(np.float32)
             self.dead_matter = np.clip(self.dead_matter, 0.0, 1.0).astype(np.float32)
+
+        self.biotic_pressure *= _decay_factor(self.config.biotic_pressure_decay_rate, steps)
+        self.biotic_pressure = np.maximum(self.biotic_pressure, phase5_pressure).astype(np.float32)
+        self.biotic_pressure = _diffuse(self.biotic_pressure, 0.006, max(1, min(8, int(round(steps / 64))))).astype(np.float32)
+        self.biotic_pressure = np.clip(self.biotic_pressure, 0.0, 1.0).astype(np.float32)
 
     def _update_dead_matter(self, dt: float) -> None:
         if float(self.dead_matter.max()) <= 0.0:
@@ -712,6 +829,7 @@ class Planet:
             self.biomass.fill(0.0)
             self.diversity.fill(0.0)
             self.dominant_species_index.fill(-1)
+            self.biotic_pressure.fill(0.0)
             return
 
         active = self.populations[: len(self.species)]
@@ -780,6 +898,7 @@ def _empty_habitat_summary(species_id: int, total_population: float = 0.0) -> Li
         mean_nutrients=0.0,
         mean_chemical_energy=0.0,
         mean_dead_matter=0.0,
+        mean_biotic_pressure=0.0,
         mean_light=0.0,
         land_share=0.0,
     )

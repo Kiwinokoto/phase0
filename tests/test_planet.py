@@ -20,6 +20,7 @@ NORMALIZED_FIELD_NAMES = [
     "toxicity",
     "fertility",
     "dead_matter",
+    "biotic_pressure",
     "biomass",
     "diversity",
 ]
@@ -33,6 +34,7 @@ DYNAMIC_FIELD_NAMES = [
     "toxicity",
     "fertility",
     "dead_matter",
+    "biotic_pressure",
     "biomass",
     "diversity",
 ]
@@ -388,6 +390,35 @@ def test_lineage_lookup_and_descendant_count_are_available():
     assert planet.species_index_by_id(999999) is None
 
 
+def test_lineage_genealogy_helpers_return_ordered_family_rows():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=1820,
+        abiogenesis_rate=0.35,
+        abiogenesis_fertility_threshold=0.18,
+        speciation_rate=0.0030,
+    )
+    planet = Planet.generate(config)
+    for _ in range(8):
+        planet.step(600)
+    assert planet.species
+
+    # Prefer a lineage that actually has a parent when available.
+    selected = next((species for species in planet.species if species.parent_id is not None), planet.species[0])
+    ancestors = planet.lineage_ancestors(selected.id, include_self=True)
+    children = planet.lineage_children(selected.id)
+    descendants = planet.lineage_descendants(selected.id)
+
+    assert ancestors
+    assert ancestors[-1].id == selected.id
+    assert all(child.parent_id == selected.id for child in children)
+    assert all(depth >= 1 for depth, _species in descendants)
+    assert planet.descendant_count(selected.id) == len(descendants)
+    if selected.parent_id is not None:
+        assert any(ancestor.id == selected.parent_id for ancestor in ancestors)
+
+
 def test_lineage_habitat_summary_describes_current_distribution():
     config = PlanetConfig(
         width=64,
@@ -502,3 +533,102 @@ def test_geological_intro_layer_is_visual_only_and_converges_to_planet_shape():
     assert np.mean(np.abs(late.astype(float) - biome.astype(float))) < 16.0
     assert planet.tick == before_tick
     assert planet.total_biomass == before_biomass
+
+
+def test_phase5_traits_include_consumption_defense_and_storage():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=2425,
+        abiogenesis_rate=0.30,
+        abiogenesis_fertility_threshold=0.18,
+    )
+    planet = Planet.generate(config)
+    planet.step(900)
+    assert planet.species
+
+    traits = planet.species[0].traits
+    assert 0.0 <= traits.living_consumption <= 1.0
+    assert 0.0 <= traits.defense <= 1.0
+    assert 0.0 <= traits.storage <= 1.0
+    assert planet.species_strategy_label(planet.species[0])
+
+
+def test_phase5_biotic_pressure_layer_appears_when_life_interacts():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=2526,
+        abiogenesis_rate=0.35,
+        abiogenesis_fertility_threshold=0.18,
+        speciation_rate=0.0025,
+    )
+    planet = Planet.generate(config)
+    for _ in range(8):
+        planet.step(500)
+
+    assert planet.total_biomass > 0.0
+    assert float(planet.biotic_pressure.min()) >= 0.0
+    assert float(planet.biotic_pressure.max()) <= 1.0
+    assert float(planet.biotic_pressure.max()) > 0.0
+
+    rgb = render_layer(planet, "biotic_pressure")
+    assert rgb.shape == (32, 64, 3)
+    assert rgb.dtype == np.uint8
+
+
+def test_phase5_consumer_advantage_depends_on_available_living_biomass():
+    config = PlanetConfig(width=48, height=24, seed=2627, abiogenesis_rate=0.0)
+    planet = Planet.generate(config)
+
+    from alife.life import LifeSpecies, LifeTraits, species_color
+
+    prey_traits = LifeTraits(
+        photosynthesis=0.8, chemosynthesis=0.1, organic_absorption=0.1,
+        living_consumption=0.0, defense=0.05, storage=0.1,
+        temperature_optimum_c=20.0, temperature_tolerance_c=30.0,
+        water_preference=0.5, water_tolerance=0.8, toxicity_tolerance=1.0,
+        reproduction_rate=0.9, metabolism_cost=0.04, dispersal=0.0, mutation_rate=0.01,
+    )
+    consumer_traits = LifeTraits(
+        photosynthesis=0.0, chemosynthesis=0.0, organic_absorption=0.0,
+        living_consumption=1.0, defense=0.1, storage=0.1,
+        temperature_optimum_c=20.0, temperature_tolerance_c=30.0,
+        water_preference=0.5, water_tolerance=0.8, toxicity_tolerance=1.0,
+        reproduction_rate=1.1, metabolism_cost=0.04, dispersal=0.0, mutation_rate=0.01,
+    )
+    planet.species.extend([
+        LifeSpecies(1, None, "Prey-001", species_color(prey_traits), prey_traits, planet.tick),
+        LifeSpecies(2, None, "Consumer-002", species_color(consumer_traits), consumer_traits, planet.tick),
+    ])
+    planet.populations[0, 8:16, 18:30] = 0.32
+    planet.populations[1, 10:14, 22:26] = 0.08
+    planet.nutrients.fill(0.8)
+    planet.light.fill(0.8)
+    planet.fertility.fill(0.8)
+    planet.temperature_c.fill(20.0)
+    planet.humidity.fill(0.5)
+    planet.toxicity.fill(0.0)
+    planet._update_biomass_maps()
+    consumer_before = planet.species_total_population(2)
+
+    planet.step(160)
+
+    assert planet.species_total_population(2) >= consumer_before
+    assert float(planet.biotic_pressure.max()) > 0.0
+
+
+def test_lineage_habitat_summary_includes_biotic_pressure():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=2728,
+        abiogenesis_rate=0.30,
+        abiogenesis_fertility_threshold=0.18,
+    )
+    planet = Planet.generate(config)
+    planet.step(900)
+    species, _total = planet.top_species(limit=1)[0]
+    summary = planet.lineage_habitat_summary(species.id)
+
+    assert 0.0 <= summary.mean_biotic_pressure <= 1.0
