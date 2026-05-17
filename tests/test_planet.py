@@ -1,7 +1,7 @@
 import numpy as np
 
 from alife import Planet, PlanetConfig
-from alife.viewer import PLANET_SETUP_FIELDS, render_layer, should_apply_life_overlay
+from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, geological_intro_stage, render_geological_intro_layer, render_layer, should_apply_life_overlay
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -443,3 +443,62 @@ def test_setup_fields_target_valid_planet_config_values():
         assert len(field.high_color) == 3
         assert all(0 <= channel <= 255 for channel in (*field.low_color, *field.high_color))
 
+
+
+def test_setup_detail_fields_are_kept_in_deterministic_bottom_group():
+    primary_keys = [field.key for field in PRIMARY_SETUP_FIELDS]
+    detail_keys = [field.key for field in DETAIL_SETUP_FIELDS]
+    all_keys = [field.key for field in PLANET_SETUP_FIELDS]
+
+    assert detail_keys == ["detail_octaves", "detail_gain"]
+    assert "detail_octaves" not in primary_keys
+    assert "detail_gain" not in primary_keys
+    assert all_keys[-2:] == detail_keys
+
+
+def test_major_events_are_logged_for_observer_panel():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=2122,
+        abiogenesis_rate=0.35,
+        abiogenesis_fertility_threshold=0.18,
+        speciation_rate=0.0025,
+        volcanic_pulse_rate=0.20,
+    )
+    planet = Planet.generate(config)
+    for _ in range(5):
+        planet.step(500)
+
+    events = planet.recent_events(limit=12)
+    assert events
+    assert all(event.tick <= planet.tick for event in events)
+    assert any(event.kind in {"birth", "branch", "volcanism"} for event in events)
+    assert len(planet.recent_events(limit=3)) <= 3
+
+
+def test_geological_intro_stage_progression_is_ordered():
+    assert geological_intro_stage(0.0).title.startswith("Accretion")
+    assert geological_intro_stage(0.25).title == "Magma ocean"
+    assert geological_intro_stage(0.50).title.startswith("Heavy rain")
+    assert geological_intro_stage(0.70).title == "Cooling crust"
+    assert geological_intro_stage(1.0).title == "Young stable planet"
+
+
+def test_geological_intro_layer_is_visual_only_and_converges_to_planet_shape():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=2324))
+    before_tick = planet.tick
+    before_biomass = planet.total_biomass
+
+    early = render_geological_intro_layer(planet, 0.0)
+    late = render_geological_intro_layer(planet, 1.0)
+    biome = render_layer(planet, "biome", overlay_mode="off")
+
+    assert early.shape == (32, 64, 3)
+    assert late.shape == (32, 64, 3)
+    assert early.dtype == np.uint8
+    assert late.dtype == np.uint8
+    assert not np.array_equal(early, late)
+    assert np.mean(np.abs(late.astype(float) - biome.astype(float))) < 16.0
+    assert planet.tick == before_tick
+    assert planet.total_biomass == before_biomass

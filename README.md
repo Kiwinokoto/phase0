@@ -16,6 +16,7 @@ Le viewer démarre maintenant sur un écran de préparation avant de lancer la s
 - seed utilisée
 - statistiques résultantes de la planète générée
 - paramètres modifiables de génération
+- case `Skip formation intro` décochée par défaut
 - bouton Start simulation en bas
 ```
 
@@ -26,19 +27,25 @@ Paramètres modifiables dans le setup :
 ```text
 sea level
 continent scale
-detail octaves
-detail gain
 volcanism
 equator temperature
 pole temperature
+
+Terrain detail — deterministic
+detail octaves
+detail gain
 ```
 
+Les deux paramètres de détail restent regroupés en bas : ils changent la texture/fractale du relief, mais ne sont pas randomisés automatiquement.
+
 Quand la planète te plaît, clique `Start simulation` ou appuie sur `Enter` / `Space`.
+
+Par défaut, `Skip formation intro` est décoché : `Start simulation` joue une intro géologique déterministe, plus lente et purement visuelle. Elle raconte la transition accrétion / magma ocean / pluies intenses / refroidissement / planète jeune stable. Cette intro ne modifie pas la planète générée, elle prépare simplement le départ de la simulation. Coche `Skip formation intro` quand tu veux tester vite. Pendant l'intro, `Enter` / `Space` passe directement à la simulation.
 
 Raccourcis utiles pendant le setup :
 
 ```text
-Enter/Space   lancer la simulation
+Enter/Space   lancer la simulation ou skipper l’intro
 r             seed aléatoire
 f/F11         plein écran / fenêtre
 s             screenshot
@@ -191,7 +198,8 @@ Les tests vérifient notamment :
 - champs de vie bornés ;
 - production de matière morte après croissance/stress ;
 - population contrainte par les ressources ;
-- évolution déterministe à seed et steps identiques.
+- évolution déterministe à seed et steps identiques ;
+- rendu d'intro géologique déterministe et sans effet sur la simulation.
 
 ## Notes Linux / Mesa / GLX
 
@@ -236,6 +244,8 @@ The right panel is now grouped from general to particular instead of being one l
 ```
 
 Runtime sections are collapsible: click a section header to fold or unfold it. This keeps the panel usable as more ecology and lineage data is added. The legend stays available near the bottom because it explains the currently visible layer.
+
+The panel also includes a compact event log for major observable events: abiogenesis, lineage branching, extinctions, and volcanic pulses.
 
 ## Phase 4 species cards patch
 
@@ -282,4 +292,23 @@ After `Start simulation`, the right panel is ordered from general to particular:
 Simulation → Planet averages → Life summary → Selected zone → Selected lineage / habitat
 ```
 
-Click any section header to collapse or expand it. The layer legend remains pinned near the bottom of the panel so it does not get buried behind lineage details.
+Click any section header to collapse or expand it. The layer legend remains pinned near the bottom of the panel so it does not get buried behind lineage details; it is collapsible too when you need extra room.
+
+
+## Phase 4 finish polish
+
+Small final Phase 4 polish before moving to richer ecology:
+
+```text
+- setup sliders now keep deterministic terrain-detail controls grouped at the bottom
+- runtime panel adds a compact collapsible event log
+- event log records births, branches, extinctions and volcanic pulses
+- recent events are exposed via Planet.recent_events(limit=...) for tests/UI
+```
+
+
+## Phase 4 geological intro UX polish
+
+The setup screen now treats the geological prelude as the default experience: `Skip formation intro` starts unchecked. The intro is slower and more contemplative, so the cloud/accretion, primordial fire, rain/condensation and young-planet stages have time to read visually.
+
+The right panel section headers are more separated and visually anchored, and the runtime layer legend can now be collapsed like the other sections.

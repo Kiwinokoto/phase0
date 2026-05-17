@@ -19,6 +19,17 @@ from .life import (
 
 
 @dataclass(frozen=True)
+class SimulationEvent:
+    """Small observable history item for the right-panel event log."""
+
+    tick: int
+    kind: str
+    message: str
+    species_id: int | None = None
+    location: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
 class LineageHabitatSummary:
     """Computed observation data for one lineage.
 
@@ -79,6 +90,7 @@ class Planet:
     next_species_id: int = 1
     extinction_count: int = 0
     tick: int = 0
+    event_log: list[SimulationEvent] = field(default_factory=list)
 
     @classmethod
     def generate(cls, config: PlanetConfig) -> "Planet":
@@ -160,6 +172,30 @@ class Planet:
     @property
     def total_dead_matter(self) -> float:
         return float(self.dead_matter.sum())
+
+    def recent_events(self, limit: int = 6) -> list[SimulationEvent]:
+        """Return recent major events, newest first, for the observer UI."""
+        return list(reversed(self.event_log[-max(0, int(limit)) :]))
+
+    def _log_event(
+        self,
+        kind: str,
+        message: str,
+        *,
+        species_id: int | None = None,
+        location: tuple[int, int] | None = None,
+    ) -> None:
+        self.event_log.append(
+            SimulationEvent(
+                tick=int(self.tick),
+                kind=str(kind),
+                message=str(message),
+                species_id=species_id,
+                location=location,
+            )
+        )
+        if len(self.event_log) > 120:
+            del self.event_log[: len(self.event_log) - 120]
 
     def top_species(self, limit: int = 5) -> list[tuple[LifeSpecies, float]]:
         totals: list[tuple[LifeSpecies, float]] = []
@@ -324,9 +360,15 @@ class Planet:
             weights /= weights.sum()
             flat_indices = self.rng.choice(weights.size, size=pulse_count, replace=True, p=weights.ravel())
             height, width = self.shape
+            last_location: tuple[int, int] | None = None
             for flat_index in np.atleast_1d(flat_indices):
                 y, x = divmod(int(flat_index), width)
+                last_location = (int(x), int(y))
                 self._add_volcanic_pulse(y, x)
+            if pulse_count == 1 and last_location is not None:
+                self._log_event("volcanism", f"volcanic pulse at x{last_location[0]} y{last_location[1]}", location=last_location)
+            else:
+                self._log_event("volcanism", f"{pulse_count} volcanic pulses")
 
         self.volcanic_pulses = np.clip(self.volcanic_pulses, 0.0, 1.0).astype(np.float32)
         self.volcanism = np.clip(self.base_volcanism + self.volcanic_pulses, 0.0, 1.0).astype(np.float32)
@@ -465,6 +507,7 @@ class Planet:
         index = len(self.species)
         self.species.append(species)
         self._add_population_blob(index, y, x, self.config.initial_seed_population, radius=2.3)
+        self._log_event("birth", f"{species.name} appears at x{x} y{y}", species_id=species.id, location=(int(x), int(y)))
 
     def _add_population_blob(self, index: int, y0: int, x0: int, amount: float, radius: float) -> None:
         height, width = self.shape
@@ -604,6 +647,7 @@ class Planet:
             species.extinct_tick = self.tick
             self.populations[index].fill(0.0)
             self.extinction_count += 1
+            self._log_event("extinction", f"{species.name} goes extinct", species_id=species.id)
 
     def _maybe_branch_lineages(self, steps: int) -> None:
         if len(self.species) >= self.config.max_species or not self.species:
@@ -656,6 +700,12 @@ class Planet:
         seed_amount = float(np.clip(self.populations[parent_index, y, x] * 0.35, 0.025, 0.12))
         self._add_population_blob(index, y, x, seed_amount, radius=2.0)
         self.populations[parent_index, y, x] *= 0.92
+        self._log_event(
+            "branch",
+            f"{species.name} branches from {parent.name}",
+            species_id=species.id,
+            location=(int(x), int(y)),
+        )
 
     def _update_biomass_maps(self) -> None:
         if not self.species:

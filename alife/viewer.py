@@ -35,15 +35,20 @@ class SetupField:
         return f"{float(value):.{self.decimals}f}"
 
 
-PLANET_SETUP_FIELDS: tuple[SetupField, ...] = (
+PRIMARY_SETUP_FIELDS: tuple[SetupField, ...] = (
     SetupField("sea_level", "Sea level", 0.02, 0.34, 0.68, 2, (82, 132, 76), (52, 132, 205)),
     SetupField("continent_scale", "Continent scale", 1.0, 2.0, 9.0, 0, (70, 58, 48), (210, 180, 104)),
-    SetupField("detail_octaves", "Detail octaves", 1.0, 1.0, 7.0, 0, (60, 66, 80), (205, 212, 198)),
-    SetupField("detail_gain", "Detail gain", 0.03, 0.35, 0.72, 2, (72, 60, 50), (220, 205, 132)),
     SetupField("volcanic_activity_fraction", "Volcanism", 0.01, 0.01, 0.24, 2, (62, 42, 76), (255, 116, 45)),
     SetupField("equator_temperature_c", "Equator temp", 1.0, 8.0, 48.0, 0, (60, 86, 170), (210, 72, 46)),
     SetupField("pole_temperature_c", "Pole temp", 1.0, -45.0, 8.0, 0, (35, 70, 155), (215, 230, 238)),
 )
+
+DETAIL_SETUP_FIELDS: tuple[SetupField, ...] = (
+    SetupField("detail_octaves", "Detail octaves", 1.0, 1.0, 7.0, 0, (60, 66, 80), (205, 212, 198)),
+    SetupField("detail_gain", "Detail gain", 0.03, 0.35, 0.72, 2, (72, 60, 50), (220, 205, 132)),
+)
+
+PLANET_SETUP_FIELDS: tuple[SetupField, ...] = PRIMARY_SETUP_FIELDS + DETAIL_SETUP_FIELDS
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,15 @@ class LayerLegend:
     colors: tuple[Color, ...] = ()
     labels: tuple[str, ...] = ()
     categories: tuple[tuple[str, Color], ...] = ()
+
+
+@dataclass(frozen=True)
+class GeologicalIntroStage:
+    title: str
+    description: tuple[str, ...]
+
+
+INTRO_DURATION_FRAMES = 960
 
 
 LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
@@ -190,6 +204,10 @@ class PlanetViewer:
         self.layer_index = 0
         self.paused = False
         self.in_setup_screen = True
+        self.intro_active = False
+        self.intro_frame = 0
+        self.intro_duration_frames = INTRO_DURATION_FRAMES
+        self.skip_intro = False
         self.fullscreen = bool(start_fullscreen)
         self.life_overlay_mode: OverlayMode = "biomass"
         self.speed = planet.config.initial_speed
@@ -254,7 +272,12 @@ class PlanetViewer:
                     self._update_layout()
                     self._invalidate_cache()
 
-            if not self.in_setup_screen and not self.paused:
+            if self.intro_active:
+                self.intro_frame += 1
+                if self.intro_frame >= self.intro_duration_frames:
+                    self._start_simulation()
+                self._invalidate_cache()
+            elif not self.in_setup_screen and not self.paused:
                 self.planet.step(self.speed)
                 self._invalidate_cache()
 
@@ -307,8 +330,11 @@ class PlanetViewer:
             if key in (pygame.K_f, pygame.K_F11):
                 self._toggle_fullscreen()
             elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
-                self._start_simulation()
-            elif key == pygame.K_r:
+                if self.intro_active:
+                    self._start_simulation()
+                else:
+                    self._begin_start_flow()
+            elif key == pygame.K_r and not self.intro_active:
                 self._randomize_setup_seed()
             elif key == pygame.K_s:
                 self._save_screenshot()
@@ -395,7 +421,11 @@ class PlanetViewer:
         ):
             return self.cached_surface
 
-        rgb = render_layer(self.planet, layer, overlay_mode=overlay_mode)
+        if self.intro_active:
+            progress = self._intro_progress()
+            rgb = render_geological_intro_layer(self.planet, progress)
+        else:
+            rgb = render_layer(self.planet, layer, overlay_mode=overlay_mode)
         surface = pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
         if surface.get_size() != self.map_rect.size:
             surface = pygame.transform.scale(surface, self.map_rect.size)
@@ -436,11 +466,13 @@ class PlanetViewer:
         y = self._draw_compact_controls(x, y, content_w)
         y += 10
 
-        legend_y = max(y + 250, panel.bottom - 178)
-        section_limit = legend_y - 10
+        legend_height = 36 if self._is_collapsed("legend") else 178
+        legend_y = max(y + 250, panel.bottom - legend_height)
+        section_limit = legend_y - 12
 
         for draw_section in (
             self._draw_simulation_summary,
+            self._draw_event_log,
             self._draw_planet_summary,
             self._draw_life_summary,
             self._draw_selected_zone,
@@ -451,12 +483,16 @@ class PlanetViewer:
                 y += 16
                 break
             y = draw_section(x, y, content_w)
-            y += 8
+            y += 12
 
         self._draw_current_layer_legend(x, legend_y, content_w)
 
 
     def _draw_setup_panel(self, x: int, y: int, width: int) -> None:
+        if self.intro_active:
+            self._draw_intro_panel(x, y, width)
+            return
+
         self._draw_text("Artificial Life Sandbox", x, y, self.font, (235, 238, 245))
         y += 24
         self._draw_text("Planet setup — preview before simulation", x, y, self.tiny_font, (165, 174, 196))
@@ -493,21 +529,94 @@ class PlanetViewer:
         y += 8
 
         y = self._draw_section_title("Planet parameters", x, y, width)
-        for field in PLANET_SETUP_FIELDS:
+        for field in PRIMARY_SETUP_FIELDS:
             if y > self.panel_rect.bottom - 72:
                 self._draw_text("Panel too short: resize or use fullscreen.", x, y, self.tiny_font, (190, 170, 130))
                 break
             y = self._draw_setup_field_row(field, x, y, width)
 
-        hint_y = max(y + 12, self.panel_rect.bottom - 98)
+        if y <= self.panel_rect.bottom - 126:
+            y += 8
+            self._draw_text("Terrain detail — deterministic", x, y, self.tiny_font, (150, 160, 184))
+            y += 16
+            for field in DETAIL_SETUP_FIELDS:
+                if y > self.panel_rect.bottom - 72:
+                    self._draw_text("Panel too short: resize or use fullscreen.", x, y, self.tiny_font, (190, 170, 130))
+                    break
+                y = self._draw_setup_field_row(field, x, y, width)
+
+        hint_y = max(y + 12, self.panel_rect.bottom - 124)
         for line in ("Changes regenerate the preview immediately.", "Enter/Space starts.  R chooses a random seed."):
-            if hint_y + 14 < self.panel_rect.bottom - 48:
+            if hint_y + 14 < self.panel_rect.bottom - 74:
                 self._draw_text(line, x, hint_y, self.tiny_font, (150, 160, 184))
                 hint_y += 14
+
+        checkbox_rect = pygame.Rect(x, self.panel_rect.bottom - 70, width, 22)
+        self.setup_control_rects.append((checkbox_rect, "toggle_skip_intro", ""))
+        self._draw_checkbox_row(checkbox_rect, "Skip formation intro", self.skip_intro)
 
         start_rect = pygame.Rect(x, self.panel_rect.bottom - 42, width, 30)
         self.setup_control_rects.append((start_rect, "start", ""))
         self._draw_button(start_rect, "Start simulation")
+
+    def _draw_intro_panel(self, x: int, y: int, width: int) -> None:
+        progress = self._intro_progress()
+        stage = geological_intro_stage(progress)
+
+        self._draw_text("Artificial Life Sandbox", x, y, self.font, (235, 238, 245))
+        y += 24
+        self._draw_text("Geological prelude — visual only", x, y, self.tiny_font, (165, 174, 196))
+        y += 24
+
+        button_h = 28
+        fullscreen_label = "Window" if self.fullscreen else "Fullscreen"
+        self.fullscreen_button_rect = pygame.Rect(x, y, min(170, width), button_h)
+        self._draw_button(self.fullscreen_button_rect, fullscreen_label)
+        y += button_h + 14
+
+        y = self._draw_section_title("Formation stage", x, y, width)
+        self._draw_text(stage.title, x, y, self.small_font, (235, 238, 245))
+        y += 18
+        for line in stage.description:
+            self._draw_text(line, x, y, self.tiny_font, (170, 180, 204))
+            y += 14
+        y += 8
+
+        bar = pygame.Rect(x, y, width, 16)
+        pygame.draw.rect(self.screen, (20, 24, 34), bar, border_radius=8)
+        pygame.draw.rect(self.screen, (54, 64, 86), bar, 1, border_radius=8)
+        filled = pygame.Rect(bar.left, bar.top, int(bar.width * progress), bar.height)
+        if filled.width > 0:
+            self._draw_gradient_bar(filled, ((80, 42, 42), (100, 140, 190), (148, 215, 150)))
+        pygame.draw.rect(self.screen, (84, 96, 126), bar, 1, border_radius=8)
+        pct = self.tiny_font.render(f"{int(progress * 100):3d}%", True, (230, 234, 244))
+        self.screen.blit(pct, (bar.centerx - pct.get_width() // 2, bar.top + 1))
+        y += 28
+
+        y = self._draw_section_title("Planet outcome", x, y, width)
+        y = self._draw_key_value_grid(
+            (
+                ("seed", str(self.planet.config.seed)),
+                ("land", f"{100.0 * self.planet.land.mean():.1f}%"),
+                ("ocean", f"{100.0 * (1.0 - self.planet.land.mean()):.1f}%"),
+                ("volcanism", f"{self.planet.volcanism.mean():.2f}"),
+                ("fertility", f"{self.planet.fertility.mean():.2f}"),
+                ("temp avg", f"{self.planet.temperature_c.mean():.1f} C"),
+            ),
+            x,
+            y,
+            width,
+        )
+
+        note_y = max(y + 18, self.panel_rect.bottom - 92)
+        for line in ("The prelude does not alter the generated planet.", "Enter/Space skips to simulation."):
+            if note_y + 14 < self.panel_rect.bottom - 48:
+                self._draw_text(line, x, note_y, self.tiny_font, (150, 160, 184))
+                note_y += 14
+
+        skip_rect = pygame.Rect(x, self.panel_rect.bottom - 42, width, 30)
+        self.setup_control_rects.append((skip_rect, "skip_intro_now", ""))
+        self._draw_button(skip_rect, "Skip intro / start now")
 
     def _draw_seed_setup_row(self, x: int, y: int, width: int) -> int:
         random_w = 88
@@ -592,7 +701,11 @@ class PlanetViewer:
 
     def _handle_setup_action(self, action: str, key: str) -> None:
         if action == "start":
+            self._begin_start_flow()
+        elif action == "skip_intro_now":
             self._start_simulation()
+        elif action == "toggle_skip_intro":
+            self.skip_intro = not self.skip_intro
         elif action == "random_seed":
             self._randomize_setup_seed()
         elif action == "seed_delta":
@@ -601,7 +714,29 @@ class PlanetViewer:
             field_key, direction_text = key.split(":", 1)
             self._adjust_setup_field(field_key, int(direction_text))
 
+    def _begin_start_flow(self) -> None:
+        if self.skip_intro:
+            self._start_simulation()
+        else:
+            self._start_geological_intro()
+
+    def _start_geological_intro(self) -> None:
+        self.intro_active = True
+        self.intro_frame = 0
+        self.paused = True
+        self.selected_cell = None
+        self.selected_species_id = None
+        self.active_setup_slider = None
+        self._invalidate_cache()
+
+    def _intro_progress(self) -> float:
+        if not self.intro_active:
+            return 0.0
+        return float(np.clip(self.intro_frame / max(1, self.intro_duration_frames), 0.0, 1.0))
+
     def _start_simulation(self) -> None:
+        self.intro_active = False
+        self.intro_frame = 0
         self.in_setup_screen = False
         self.paused = False
         self.layer_index = 0
@@ -659,19 +794,26 @@ class PlanetViewer:
         return y + 14
 
     def _draw_section_title(self, title: str, x: int, y: int, width: int, key: str | None = None) -> int:
-        rect = pygame.Rect(x, y, width, 22)
+        rect = pygame.Rect(x, y, width, 25)
         hovered = rect.collidepoint(pygame.mouse.get_pos())
-        fill = (34, 40, 56) if hovered and key is not None else (28, 33, 46)
-        pygame.draw.rect(self.screen, fill, rect, border_radius=6)
-        pygame.draw.rect(self.screen, (52, 62, 84), rect, 1, border_radius=6)
-        text_x = x + 9
+        fill = (42, 49, 68) if hovered and key is not None else (30, 36, 50)
+        border = (80, 94, 126) if hovered and key is not None else (56, 66, 90)
+
+        # Dark spacer/backplate: this makes each section read as a separate block
+        # without needing a full layout engine. The content below keeps the same
+        # background, but the title creates a clear visual anchor and gap.
+        pygame.draw.rect(self.screen, (14, 17, 24), rect.inflate(2, 6), border_radius=8)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=7)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=7)
+
+        text_x = x + 10
         if key is not None:
             self.section_header_rects.append((rect, key))
             marker = "+" if self._is_collapsed(key) else "-"
-            self._draw_text(marker, x + 9, y + 3, self.small_font, (170, 185, 214))
-            text_x = x + 25
-        self._draw_text(title, text_x, y + 3, self.small_font, (232, 238, 250))
-        return y + 28
+            self._draw_text(marker, x + 10, y + 4, self.small_font, (178, 196, 226))
+            text_x = x + 28
+        self._draw_text(title, text_x, y + 4, self.small_font, (236, 241, 252))
+        return y + 33
 
     def _draw_key_value_grid(
         self,
@@ -728,6 +870,32 @@ class PlanetViewer:
             y,
             width,
         )
+
+    def _draw_event_log(self, x: int, y: int, width: int) -> int:
+        y = self._draw_section_title("Event log", x, y, width, key="events")
+        if self._is_collapsed("events"):
+            return y
+
+        events = self.planet.recent_events(limit=5)
+        if not events:
+            self._draw_text("No major event yet. Let the world run.", x, y, self.tiny_font, (145, 154, 178))
+            return y + 16
+
+        for event in events:
+            color = (202, 210, 230)
+            if event.kind == "birth":
+                color = (142, 222, 158)
+            elif event.kind == "branch":
+                color = (155, 188, 245)
+            elif event.kind == "extinction":
+                color = (226, 150, 128)
+            elif event.kind == "volcanism":
+                color = (238, 174, 92)
+            text = f"t{event.tick}: {event.message}"
+            self._draw_text(self._clip_text(text, 52), x, y, self.tiny_font, color)
+            y += 14
+        return y
+
 
     def _draw_life_summary(self, x: int, y: int, width: int) -> int:
         y = self._draw_section_title("Life summary", x, y, width, key="life")
@@ -1022,6 +1190,18 @@ class PlanetViewer:
         self._draw_button(self.life_overlay_button_rect, overlay_label)
         return y + button_h
 
+    def _draw_checkbox_row(self, rect: pygame.Rect, label: str, checked: bool) -> None:
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        fill = (30, 36, 50) if hovered else (22, 26, 36)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=6)
+        box = pygame.Rect(rect.left + 5, rect.top + 3, 16, 16)
+        pygame.draw.rect(self.screen, (24, 29, 40), box, border_radius=3)
+        pygame.draw.rect(self.screen, (96, 112, 145), box, 1, border_radius=3)
+        if checked:
+            pygame.draw.line(self.screen, (152, 224, 170), (box.left + 3, box.centery), (box.left + 7, box.bottom - 4), 2)
+            pygame.draw.line(self.screen, (152, 224, 170), (box.left + 7, box.bottom - 4), (box.right - 3, box.top + 4), 2)
+        self._draw_text(label, rect.left + 28, rect.top + 4, self.tiny_font, (210, 218, 236))
+
     def _draw_button(self, rect: pygame.Rect, label: str) -> None:
         mouse_pos = pygame.mouse.get_pos()
         hovered = rect.collidepoint(mouse_pos)
@@ -1040,7 +1220,9 @@ class PlanetViewer:
         legend = LAYER_LEGENDS[self.current_layer]
         max_bar_w = width if width is not None else max(140, self.panel_rect.width - 44)
 
-        y = self._draw_section_title("Layer legend", x, y, max_bar_w)
+        y = self._draw_section_title("Layer legend", x, y, max_bar_w, key="legend")
+        if self._is_collapsed("legend"):
+            return y
         self._draw_text(legend.title, x, y, self.small_font, (220, 226, 240))
         y += 16
         for line in legend.description:
@@ -1126,6 +1308,105 @@ class PlanetViewer:
 def _lerp_color(low: Color, high: Color, t: float) -> Color:
     return tuple(int(a * (1.0 - t) + b * t) for a, b in zip(low, high))  # type: ignore[return-value]
 
+
+
+def _smoothstep(edge0: float, edge1: float, x: float) -> float:
+    if edge0 == edge1:
+        return 1.0 if x >= edge1 else 0.0
+    t = float(np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def geological_intro_stage(progress: float) -> GeologicalIntroStage:
+    """Return the narrative stage for the optional formation intro."""
+    p = float(np.clip(progress, 0.0, 1.0))
+    if p < 0.18:
+        return GeologicalIntroStage(
+            "Accretion / cloud collapse",
+            ("Dust, rock and heat gather into", "a young unstable planetoid."),
+        )
+    if p < 0.40:
+        return GeologicalIntroStage(
+            "Magma ocean",
+            ("The crust is mostly molten.", "Volcanism writes the first geology."),
+        )
+    if p < 0.62:
+        return GeologicalIntroStage(
+            "Heavy rain / condensation",
+            ("The atmosphere cools and collapses", "into long violent rains."),
+        )
+    if p < 0.84:
+        return GeologicalIntroStage(
+            "Cooling crust",
+            ("Basins fill, highlands harden,", "chemistry becomes less chaotic."),
+        )
+    return GeologicalIntroStage(
+        "Young stable planet",
+        ("The previewed world is now ready", "for proto-ecology to begin."),
+    )
+
+
+def render_geological_intro_layer(planet: Planet, progress: float) -> np.ndarray:
+    """Render a deterministic, visual-only formation prelude frame.
+
+    The generated planet is already final; this function only tells a short
+    aesthetic story about how the world cools into that final state. It must not
+    mutate the planet or feed back into simulation dynamics.
+    """
+    p = float(np.clip(progress, 0.0, 1.0))
+    elevation = np.clip(planet.elevation, 0.0, 1.0).astype(np.float32)
+    volcanism = np.clip(planet.volcanism, 0.0, 1.0).astype(np.float32)
+    water = np.clip(planet.water, 0.0, 1.0).astype(np.float32)
+    final_biome = _render_biome(planet).astype(np.float32)
+
+    h, w = planet.shape
+    yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+    wave = 0.5 + 0.5 * np.sin((xx * 17.0 + yy * 11.0 + p * 8.0) * np.pi)
+
+    volcanic_setting = float(np.clip(planet.config.volcanic_activity_fraction / 0.24, 0.0, 1.0))
+    heat_setting = float(np.clip((planet.config.equator_temperature_c - 8.0) / 40.0, 0.0, 1.0))
+    sea_setting = float(np.clip((planet.config.sea_level - 0.34) / 0.34, 0.0, 1.0))
+
+    accretion_heat = np.clip(0.28 + 0.42 * elevation + 0.35 * wave + 0.25 * volcanic_setting, 0.0, 1.0)
+    accretion = _three_color_gradient(accretion_heat, (4, 6, 12), (72, 28, 26), (240, 170, 78)).astype(np.float32)
+
+    magma_heat = np.clip(0.45 + 0.28 * elevation + 0.46 * volcanism + 0.14 * heat_setting + 0.12 * wave, 0.0, 1.0)
+    magma = _three_color_gradient(magma_heat, (38, 12, 8), (170, 52, 20), (255, 205, 92)).astype(np.float32)
+    crust_mask = np.clip(_smoothstep(0.18, 0.54, p) * (elevation - 0.54) * 2.8, 0.0, 1.0)[..., None]
+    crust_color = np.array((64, 49, 42), dtype=np.float32)
+    magma = magma * (1.0 - crust_mask * 0.72) + crust_color * (crust_mask * 0.72)
+
+    ocean_birth = np.clip(water * (0.30 + 0.70 * _smoothstep(0.34, 0.62, p + 0.06 * sea_setting)), 0.0, 1.0)
+    storm_land = _three_color_gradient(elevation, (58, 52, 50), (100, 92, 78), (178, 174, 154)).astype(np.float32)
+    storm_water = _gradient(ocean_birth, (44, 54, 66), (50, 108, 160)).astype(np.float32)
+    storm = storm_land * (1.0 - ocean_birth[..., None]) + storm_water * ocean_birth[..., None]
+    rain = (0.5 + 0.5 * np.sin((xx * 40.0 + yy * 86.0 + p * 60.0) * np.pi)).astype(np.float32)
+    storm += rain[..., None] * np.array((14, 18, 24), dtype=np.float32) * 0.28
+    storm = np.clip(storm, 0, 255)
+
+    young = final_biome.copy()
+    hot_spots = np.clip(volcanism * (0.55 + 0.55 * volcanic_setting), 0.0, 1.0)[..., None]
+    young = young * (1.0 - hot_spots * 0.38) + np.array((255, 118, 46), dtype=np.float32) * (hot_spots * 0.38)
+    young = young * 0.88 + np.array((26, 30, 34), dtype=np.float32) * 0.12
+
+    if p < 0.22:
+        t = _smoothstep(0.00, 0.22, p)
+        rgb = accretion * (1.0 - t) + magma * t
+    elif p < 0.52:
+        t = _smoothstep(0.22, 0.52, p)
+        rgb = magma * (1.0 - t) + storm * t
+    elif p < 0.80:
+        t = _smoothstep(0.52, 0.80, p)
+        rgb = storm * (1.0 - t) + young * t
+    else:
+        t = _smoothstep(0.80, 1.00, p)
+        rgb = young * (1.0 - t) + final_biome * t
+
+    # Subtle dark atmosphere at the beginning, fading as the surface stabilizes.
+    darkness = 0.34 * (1.0 - _smoothstep(0.04, 0.74, p))
+    rgb *= 1.0 - darkness
+    return np.clip(rgb, 0, 255).astype(np.uint8)
 
 def render_layer(planet: Planet, layer: LayerName, overlay_mode: OverlayMode = "off") -> np.ndarray:
     base = _render_base_layer(planet, layer)
