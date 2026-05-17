@@ -235,7 +235,7 @@ class PlanetViewer:
         self.intro_active = False
         self.intro_frame = 0
         self.intro_duration_frames = INTRO_DURATION_FRAMES
-        self.skip_intro = False
+        self.skip_intro = True
         self.fullscreen = bool(start_fullscreen)
         self.life_overlay_mode: OverlayMode = "biomass"
         self.weather_overlay_mode: WeatherOverlayMode = "clouds"
@@ -254,11 +254,14 @@ class PlanetViewer:
         self.event_log_modal_open = False
         self.event_log_modal_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.event_log_filter_button_rects: list[tuple[pygame.Rect, str]] = []
+        self.event_filter_show_volcanism = False
+        self.event_birth_filter_mode = "early"  # early/all/hidden
         self.setup_control_rects: list[tuple[pygame.Rect, str, str]] = []
         self.setup_slider_rects: list[tuple[pygame.Rect, str]] = []
         self.active_setup_slider: tuple[str, pygame.Rect] | None = None
         self.section_header_rects: list[tuple[pygame.Rect, str]] = []
-        self.collapsed_sections: set[str] = {"simulation", "life"}
+        self.collapsed_sections: set[str] = {"simulation", "planet", "life", "legend"}
 
         self.font = pygame.font.SysFont("monospace", 16)
         self.layer_font = pygame.font.SysFont("monospace", 20, bold=True)
@@ -408,6 +411,17 @@ class PlanetViewer:
         if self.event_log_modal_close_rect.collidepoint(pos):
             self.event_log_modal_open = False
             return
+
+        for rect, action in self.event_log_filter_button_rects:
+            if rect.collidepoint(pos):
+                if action == "toggle_volcanism":
+                    self.event_filter_show_volcanism = not self.event_filter_show_volcanism
+                elif action == "cycle_births":
+                    modes = ("early", "hidden", "all")
+                    current = modes.index(self.event_birth_filter_mode) if self.event_birth_filter_mode in modes else 0
+                    self.event_birth_filter_mode = modes[(current + 1) % len(modes)]
+                return
+
         # Click outside the modal to close it.
         if not self.event_log_modal_rect.collidepoint(pos):
             self.event_log_modal_open = False
@@ -547,7 +561,13 @@ class PlanetViewer:
         else:
             rgb = render_layer(self.planet, layer, overlay_mode=overlay_mode, weather_overlay_mode=weather_overlay_mode)
             if self.projection_mode == "3d":
-                rgb = render_globe_texture(rgb, self.map_rect.size, rotation=self._globe_rotation())
+                rgb = render_globe_texture(
+                    rgb,
+                    self.map_rect.size,
+                    rotation=self._globe_rotation(),
+                    star_rotation=self._starfield_rotation(),
+                    seed=self.planet.config.seed,
+                )
         surface = pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
         if surface.get_size() != self.map_rect.size:
             surface = pygame.transform.scale(surface, self.map_rect.size)
@@ -571,6 +591,7 @@ class PlanetViewer:
         self.genealogy_modal_close_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_button_rect = pygame.Rect(0, 0, 0, 0)
         self.event_log_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.event_log_filter_button_rects = []
         self.weather_overlay_button_rect = pygame.Rect(0, 0, 0, 0)
         self.projection_button_rect = pygame.Rect(0, 0, 0, 0)
         self.setup_control_rects = []
@@ -654,6 +675,8 @@ class PlanetViewer:
                 ("volcanism", f"{self.planet.volcanism.mean():.2f}"),
                 ("year", f"{self.planet.config.seasonal_period_ticks} ticks"),
                 ("cloud/rain", self._weather_mean_label()),
+                ("bio land", f"{self._land_biomass_share():.1f}%"),
+                ("bio ocean", self._ocean_biomass_share_label()),
             ),
             x,
             y,
@@ -1017,9 +1040,9 @@ class PlanetViewer:
         if self._is_collapsed("events"):
             return y
 
-        events = self.planet.recent_events(limit=5)
+        events = self._filtered_events_newest(limit=5)
         if not events:
-            self._draw_text("No major event yet. Let the world run.", x, y, self.tiny_font, (145, 154, 178))
+            self._draw_text("No visible events with current filters.", x, y, self.tiny_font, (145, 154, 178))
             y += 18
         else:
             for event in events:
@@ -1036,7 +1059,8 @@ class PlanetViewer:
         if kind == "birth":
             return (142, 222, 158)
         if kind == "branch":
-            return (155, 188, 245)
+            # Descendant/speciation events should pop visually in logs.
+            return (255, 218, 92)
         if kind == "extinction":
             return EXTINCT_CRIMSON
         if kind == "volcanism":
@@ -1082,6 +1106,8 @@ class PlanetViewer:
                 ("tox", f"{self.planet.toxicity.mean():.2f}"),
                 ("fert", f"{self.planet.fertility.mean():.2f}"),
                 ("cloud/rain", self._weather_mean_label()),
+                ("bio land", f"{self._land_biomass_share():.1f}%"),
+                ("bio ocean", self._ocean_biomass_share_label()),
             ),
             x,
             y,
@@ -1267,18 +1293,20 @@ class PlanetViewer:
         return y + row_h
 
     def _draw_event_log_modal(self) -> None:
-        events = list(reversed(self.planet.event_log))
+        all_events = list(reversed(self.planet.event_log))
+        events = self._filtered_events_newest(limit=None)
         screen_w, screen_h = self.screen.get_size()
         overlay = pygame.Surface((screen_w, screen_h), pygame.SRCALPHA)
         overlay.fill((3, 5, 10, 168))
         self.screen.blit(overlay, (0, 0))
 
-        modal_w = min(920, screen_w - 90)
-        modal_h = min(700, screen_h - 86)
-        modal_w = max(540, modal_w)
-        modal_h = max(440, modal_h)
+        modal_w = min(940, screen_w - 90)
+        modal_h = min(720, screen_h - 86)
+        modal_w = max(560, modal_w)
+        modal_h = max(460, modal_h)
         modal = pygame.Rect((screen_w - modal_w) // 2, (screen_h - modal_h) // 2, modal_w, modal_h)
         self.event_log_modal_rect = modal
+        self.event_log_filter_button_rects = []
 
         pygame.draw.rect(self.screen, (18, 22, 32), modal, border_radius=12)
         pygame.draw.rect(self.screen, (84, 96, 126), modal, 1, border_radius=12)
@@ -1294,7 +1322,7 @@ class PlanetViewer:
         self._draw_text("World event summary", x, y, self.font, (238, 243, 252))
         y += 24
         self._draw_text(
-            "Major births, branches, extinctions and volcanic pulses.",
+            "Births/extinctions can be filtered; branch descendants are always highlighted in yellow.",
             x,
             y,
             self.tiny_font,
@@ -1306,36 +1334,90 @@ class PlanetViewer:
         y = self._draw_key_value_grid(
             (
                 ("events", str(len(self.planet.event_log))),
+                ("visible", str(len(events))),
                 ("births", str(counts.get("birth", 0))),
                 ("branches", str(counts.get("branch", 0))),
                 ("extinct", str(counts.get("extinction", 0))),
                 ("volcanic", str(counts.get("volcanism", 0))),
                 ("current tick", str(self.planet.tick)),
+                ("birth cutoff", f"t{self._birth_event_cutoff_tick()}"),
             ),
             x,
             y,
             width,
-            columns=3,
+            columns=4,
         )
-        y += 16
+        y += 14
+
+        button_gap = 10
+        button_h = 25
+        half = (width - button_gap) // 2
+        volcano_label = "Volcanoes: shown" if self.event_filter_show_volcanism else "Volcanoes: hidden"
+        if self.event_birth_filter_mode == "all":
+            birth_label = "Births: all"
+        elif self.event_birth_filter_mode == "hidden":
+            birth_label = "Births: hidden"
+        else:
+            birth_label = "Births: early only"
+
+        volcano_rect = pygame.Rect(x, y, half, button_h)
+        birth_rect = pygame.Rect(x + half + button_gap, y, half, button_h)
+        self.event_log_filter_button_rects.append((volcano_rect, "toggle_volcanism"))
+        self.event_log_filter_button_rects.append((birth_rect, "cycle_births"))
+        self._draw_button(volcano_rect, volcano_label)
+        self._draw_button(birth_rect, birth_label)
+        y += button_h + 12
 
         row_top = y
-        row_bottom = modal.bottom - 42
-        if not events:
+        row_bottom = modal.bottom - 44
+        if not all_events:
             self._draw_text("No major event yet. Let the world run.", x, row_top, self.tiny_font, (150, 160, 184))
+        elif not events:
+            self._draw_text("All current events are hidden by filters.", x, row_top, self.tiny_font, (150, 160, 184))
         else:
             visible_rows = max(1, (row_bottom - row_top) // 18)
             for event in events[:visible_rows]:
                 color = self._event_kind_color(event.kind)
                 loc = "" if event.location is None else f"  x{event.location[0]} y{event.location[1]}"
-                text = f"t{event.tick:<5} {event.kind:<10} {event.message}{loc}"
+                marker = "★ DESCENDANT " if event.kind == "branch" else ""
+                text = f"{marker}t{event.tick:<5} {event.kind:<10} {event.message}{loc}"
                 self._draw_text(self._clip_text(text, max(24, width // 7)), x, y, self.tiny_font, color)
                 y += 18
             remaining = len(events) - visible_rows
             if remaining > 0 and y <= row_bottom - 14:
-                self._draw_text(f"… {remaining} older events hidden", x, y, self.tiny_font, (150, 160, 184))
+                self._draw_text(f"… {remaining} older visible events hidden", x, y, self.tiny_font, (150, 160, 184))
 
-        self._draw_text("Esc, ×, or outside click closes this summary.", x, modal.bottom - 28, self.tiny_font, (155, 166, 190))
+        self._draw_text(
+            "Use Births: all to audit roots. Descendant/speciation events stay visible and yellow.",
+            x,
+            modal.bottom - 28,
+            self.tiny_font,
+            (155, 166, 190),
+        )
+
+    def _birth_event_cutoff_tick(self) -> int:
+        return max(1200, int(self.planet.config.seasonal_period_ticks))
+
+    def _event_visible_by_filter(self, event) -> bool:
+        if event.kind == "branch":
+            return True
+        if event.kind == "extinction":
+            return True
+        if event.kind == "volcanism":
+            return self.event_filter_show_volcanism
+        if event.kind == "birth":
+            if self.event_birth_filter_mode == "all":
+                return True
+            if self.event_birth_filter_mode == "hidden":
+                return False
+            return int(event.tick) <= self._birth_event_cutoff_tick()
+        return True
+
+    def _filtered_events_newest(self, limit: int | None = None) -> list:
+        events = [event for event in reversed(self.planet.event_log) if self._event_visible_by_filter(event)]
+        if limit is None:
+            return events
+        return events[: max(0, int(limit))]
 
     def _event_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -1556,6 +1638,16 @@ class PlanetViewer:
         period = max(1, int(self.planet.config.seasonal_period_ticks))
         seed_offset = (int(self.planet.config.seed) % 1000) / 1000.0 * 2.0 * np.pi
         return seed_offset + (float(self.planet.tick) / max(1.0, period * 0.72)) * 2.0 * np.pi
+
+    def _starfield_rotation(self) -> float:
+        """Rotate the distant sky once per local year.
+
+        The globe itself rotates a bit faster than this; the star field is a
+        slow background reference tied to the seeded seasonal period.
+        """
+        period = max(1, int(self.planet.config.seasonal_period_ticks))
+        seed_offset = ((int(self.planet.config.seed) >> 8) % 1000) / 1000.0 * 2.0 * np.pi
+        return seed_offset + (float(self.planet.tick) / float(period)) * 2.0 * np.pi
 
     def _globe_center_radius(self) -> tuple[tuple[int, int], int]:
         radius = max(8, int(min(self.map_rect.width, self.map_rect.height) * 0.46))
@@ -1797,6 +1889,18 @@ class PlanetViewer:
         cloud_alpha, rain_alpha, _lightning, _cloud_rgb = _atmosphere_visual_fields(self.planet)
         return f"{float(cloud_alpha.mean()):.2f}/{float(rain_alpha.mean()):.2f}"
 
+    def _land_biomass_share(self) -> float:
+        total = float(self.planet.biomass.sum())
+        if total <= 1e-9:
+            return 0.0
+        land_total = float(self.planet.biomass[self.planet.land].sum())
+        return 100.0 * land_total / total
+
+    def _ocean_biomass_share_label(self) -> str:
+        if self.planet.total_biomass <= 0.0:
+            return "0.0%"
+        return f"{100.0 - self._land_biomass_share():.1f}%"
+
     def _save_screenshot(self) -> None:
         suffixes: list[str] = []
         if self.life_overlay_mode != "off":
@@ -1991,12 +2095,87 @@ def render_geological_intro_layer(planet: Planet, progress: float) -> np.ndarray
 
 
 
-def render_globe_texture(texture_rgb: np.ndarray, target_size: tuple[int, int], *, rotation: float = 0.0) -> np.ndarray:
+
+def render_star_background(target_size: tuple[int, int], *, seed: int, rotation: float = 0.0) -> np.ndarray:
+    """Render a deterministic slow-rotating star field for the 3D projection.
+
+    This is deliberately visual-only: stars are a sky reference, not a stellar
+    mechanics simulation. The caller drives ``rotation``; the viewer uses one
+    full sky turn per local year.
+    """
+    target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
+    out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    # Slight vertical gradient keeps space from feeling perfectly flat.
+    y_grad = np.linspace(0.0, 1.0, target_h, dtype=np.float32)[:, None]
+    base = np.array((5, 7, 14), dtype=np.float32)
+    glow = np.array((10, 12, 24), dtype=np.float32)
+    out[:, :] = np.clip(base + glow * (0.28 + 0.35 * (1.0 - y_grad)), 0, 255).astype(np.uint8)[:, None, :]
+
+    rng = np.random.default_rng((int(seed) ^ 0xA571FE) & 0xFFFFFFFF)
+    area = target_w * target_h
+    star_count = int(np.clip(area / 3200, 140, 900))
+    cx = (target_w - 1) / 2.0
+    cy = (target_h - 1) / 2.0
+    max_radius = float(np.hypot(target_w, target_h)) * 0.72
+
+    # Generate in polar space around the screen center so a yearly rotation is
+    # perceptible without requiring real 3D camera math.
+    radii = np.sqrt(rng.random(star_count)) * max_radius
+    angles = rng.random(star_count) * 2.0 * np.pi + float(rotation)
+    xs = np.rint(cx + radii * np.cos(angles)).astype(np.int32)
+    ys = np.rint(cy + radii * np.sin(angles)).astype(np.int32)
+    brightness = rng.uniform(0.38, 1.0, star_count)
+    sizes = rng.choice(np.array([1, 1, 1, 1, 2, 2, 3]), size=star_count, p=[0.34, 0.24, 0.16, 0.10, 0.08, 0.06, 0.02])
+    palettes = np.array(
+        [
+            (210, 220, 255),
+            (245, 248, 255),
+            (255, 236, 195),
+            (190, 210, 255),
+        ],
+        dtype=np.float32,
+    )
+    colors = palettes[rng.integers(0, len(palettes), size=star_count)]
+
+    for x, y, b, size, color in zip(xs, ys, brightness, sizes, colors):
+        if x < -2 or y < -2 or x >= target_w + 2 or y >= target_h + 2:
+            continue
+        main = np.clip(color * (0.42 + 0.58 * b), 0, 255).astype(np.uint8)
+        if 0 <= x < target_w and 0 <= y < target_h:
+            out[y, x] = np.maximum(out[y, x], main)
+        if size >= 2:
+            halo = np.clip(color * (0.16 + 0.18 * b), 0, 255).astype(np.uint8)
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                xx = x + dx
+                yy = y + dy
+                if 0 <= xx < target_w and 0 <= yy < target_h:
+                    out[yy, xx] = np.maximum(out[yy, xx], halo)
+        if size >= 3:
+            halo2 = np.clip(color * (0.08 + 0.08 * b), 0, 255).astype(np.uint8)
+            for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, -1), (-1, 1), (1, 1)):
+                xx = x + dx
+                yy = y + dy
+                if 0 <= xx < target_w and 0 <= yy < target_h:
+                    out[yy, xx] = np.maximum(out[yy, xx], halo2)
+
+    return out
+
+def render_globe_texture(
+    texture_rgb: np.ndarray,
+    target_size: tuple[int, int],
+    *,
+    rotation: float = 0.0,
+    star_rotation: float | None = None,
+    seed: int = 0,
+) -> np.ndarray:
     """Project an equirectangular layer texture onto a rotating orthographic globe."""
     target_w, target_h = max(1, int(target_size[0])), max(1, int(target_size[1]))
     tex_h, tex_w = texture_rgb.shape[:2]
-    out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-    out[:, :] = np.array((8, 10, 18), dtype=np.uint8)
+    if star_rotation is None:
+        out = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        out[:, :] = np.array((8, 10, 18), dtype=np.uint8)
+    else:
+        out = render_star_background((target_w, target_h), seed=seed, rotation=star_rotation)
 
     radius = max(2.0, min(target_w, target_h) * 0.46)
     cx = (target_w - 1) / 2.0
@@ -2112,6 +2291,7 @@ def apply_life_overlay(planet: Planet, base_rgb: np.ndarray, overlay_mode: Overl
 
     rgb = base_rgb.astype(np.float32).copy()
     alpha = np.clip(0.12 + 0.62 * np.sqrt(biomass), 0.0, 0.68)[..., None]
+    land_mask = planet.land.astype(bool)
 
     if overlay_mode == "dominant" and planet.species:
         overlay = np.zeros_like(rgb)
@@ -2125,8 +2305,20 @@ def apply_life_overlay(planet: Planet, base_rgb: np.ndarray, overlay_mode: Overl
         return np.clip(rgb, 0, 255).astype(np.uint8)
 
     if overlay_mode == "biomass":
-        glow = np.array((70, 245, 120), dtype=np.float32)
-        rgb[mask] = rgb[mask] * (1.0 - alpha[mask]) + glow * alpha[mask]
+        # Ocean and land biomass deliberately use slightly different tones so
+        # terrestrial colonization is visible on the biome map.
+        ocean_glow = np.array((70, 245, 130), dtype=np.float32)
+        land_glow = np.array((178, 238, 92), dtype=np.float32)
+        ocean_mask = mask & ~land_mask
+        terrestrial_mask = mask & land_mask
+        if np.any(ocean_mask):
+            rgb[ocean_mask] = rgb[ocean_mask] * (1.0 - alpha[ocean_mask]) + ocean_glow * alpha[ocean_mask]
+        if np.any(terrestrial_mask):
+            land_alpha = np.clip(alpha[..., 0] * 1.12 + 0.05, 0.0, 0.78)[..., None]
+            rgb[terrestrial_mask] = (
+                rgb[terrestrial_mask] * (1.0 - land_alpha[terrestrial_mask])
+                + land_glow * land_alpha[terrestrial_mask]
+            )
         return np.clip(rgb, 0, 255).astype(np.uint8)
 
     return base_rgb

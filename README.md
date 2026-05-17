@@ -17,7 +17,7 @@ Le viewer démarre maintenant sur un écran de préparation avant de lancer la s
 - seed utilisée
 - statistiques résultantes de la planète générée
 - paramètres modifiables de génération
-- case `Skip formation intro` décochée par défaut
+- case `Skip formation intro` cochée par défaut
 - bouton Start simulation en bas
 ```
 
@@ -41,7 +41,7 @@ Les deux paramètres de détail restent regroupés en bas : ils changent la text
 
 Quand la planète te plaît, clique `Start simulation` ou appuie sur `Enter` / `Space`.
 
-Par défaut, `Skip formation intro` est décoché : `Start simulation` joue une intro géologique déterministe, plus lente et purement visuelle. Elle raconte un fondu depuis le vide spatial, l'effondrement d'un nuage lumineux, une phase volcanique explosive, fumées/nuages primordiaux, pluies de condensation, puis révélation progressive des océans et continents. Cette intro ne modifie pas la planète générée, elle prépare simplement le départ de la simulation. Coche `Skip formation intro` quand tu veux tester vite. Pendant l'intro, `Enter` / `Space` passe directement à la simulation.
+Par défaut, `Skip formation intro` est coché pour permettre les tests rapides : `Start simulation` lance directement la simulation. Décoche-le quand tu veux rejouer l'intro géologique déterministe, plus lente et purement visuelle. Elle raconte un fondu depuis le vide spatial, l'effondrement d'un nuage lumineux, une phase volcanique explosive, fumées/nuages primordiaux, pluies de condensation, puis révélation progressive des océans et continents. Cette intro ne modifie pas la planète générée, elle prépare simplement le départ de la simulation. Pendant l'intro, `Enter` / `Space` passe directement à la simulation.
 
 Raccourcis utiles pendant le setup :
 
@@ -104,6 +104,8 @@ q/esc  quitter
 `View: 2D` conserve la carte équirectangulaire classique, pratique pour lire les couches.
 
 `View: 3D` projette la même couche sur une planète en rotation lente. Ce n'est pas un moteur 3D physique : c'est un rendu orthographique logiciel de la texture 2D actuelle. Le clic d'inspection fonctionne aussi sur le disque visible de la planète ; les zones cachées au dos ne sont simplement pas cliquables.
+
+En vue 3D, le fond spatial affiche maintenant un champ d'étoiles déterministe par seed. Il tourne plus lentement que la planète, avec un cycle complet sur la durée d'une année locale (`seasonal_period_ticks`).
 
 ## Couches affichables
 
@@ -376,7 +378,7 @@ Small final Phase 4 polish before moving to richer ecology:
 
 ## Phase 4 geological intro UX polish
 
-The setup screen now treats the geological prelude as the default experience: `Skip formation intro` starts unchecked. The intro is slower and more contemplative, so the cloud/accretion, primordial fire, rain/condensation and young-planet stages have time to read visually.
+The setup screen now defaults back to fast iteration: `Skip formation intro` starts checked. Uncheck it when you want the slower contemplative geological prelude, where the cloud/accretion, primordial fire, rain/condensation and young-planet stages have time to read visually.
 
 The right panel section headers are more separated and visually anchored, and the runtime layer legend can now be collapsed like the other sections.
 
@@ -386,9 +388,11 @@ The right panel section headers are more separated and visually anchored, and th
 Small observer polish before continuing ecology work:
 
 ```text
-- Simulation and Life summary sections start collapsed by default
+- Simulation, Planet averages and Life summary sections start collapsed by default
 - Event log has an `Open event summary` button and modal
 - event summary modal shows counts plus recent major world events
+- event summary modal has filters: volcanoes hidden/shown and births early-only/hidden/all
+- branches/speciation and extinctions remain visible even when filters hide later abiogenesis noise
 - selected extinct lineages remain selected instead of visually disappearing
 - extinct lineages are shown in crimson in cards, rows and genealogy trees
 - the selected map label stays visible even when the selected lineage has no remaining population
@@ -396,3 +400,28 @@ Small observer polish before continuing ecology work:
 ```
 
 This patch remains visual/observer-only: it does not change simulation balance or generated planet fields.
+
+## Phase 5 adjustment — clearer lineage tracking
+
+This polish pass makes descendant/speciation events easier to catch while keeping the map readable:
+
+```text
+- layer legend starts folded by default
+- biomass overlay now uses distinct tones for ocean life and terrestrial life
+- Planet averages includes rough bio land / bio ocean share
+- event summary can still show all root births and all extinctions
+- branch/speciation events are highlighted in yellow and prefixed as descendants
+- event history keeps more entries so older births/extinctions are less likely to disappear
+- abiogenesis now reserves part of the lineage capacity for later descendants
+- speciation is slightly less rare, so genealogy should become visible earlier
+```
+
+Root births are still independent abiogenesis events. True descendants appear as `branch` events and have a `parent_id` in the species card/genealogy tree.
+
+
+## Phase 5 3D star field
+
+- fond d'étoiles visible uniquement en rendu `View: 3D` ;
+- étoiles générées de manière déterministe depuis la seed ;
+- rotation lente du ciel sur un cycle d'une année locale ;
+- purement visuel : aucun effet sur saisons, météo ou simulation.

@@ -199,8 +199,8 @@ class Planet:
                 location=location,
             )
         )
-        if len(self.event_log) > 120:
-            del self.event_log[: len(self.event_log) - 120]
+        if len(self.event_log) > 600:
+            del self.event_log[: len(self.event_log) - 600]
 
     def top_species(self, limit: int = 5) -> list[tuple[LifeSpecies, float]]:
         totals: list[tuple[LifeSpecies, float]] = []
@@ -506,6 +506,18 @@ class Planet:
         if len(self.species) >= self.config.max_species:
             return
 
+        # Keep late-world lineage capacity for true descendants. Earlier builds
+        # filled max_species with independent abiogenesis roots, which made
+        # genealogy feel flat and could block branch/speciation events entirely.
+        root_count = sum(1 for species in self.species if species.parent_id is None)
+        living_count = self.living_species_count
+        root_soft_cap = max(4, int(self.config.max_species * self.config.abiogenesis_root_soft_cap_fraction))
+        branch_reserved_slots = min(self.config.max_species // 2, max(0, int(self.config.min_branch_reserved_slots)))
+        if root_count >= root_soft_cap and living_count > 3:
+            return
+        if len(self.species) >= self.config.max_species - branch_reserved_slots and living_count > 3:
+            return
+
         viable = np.clip(self.fertility - self.config.abiogenesis_fertility_threshold, 0.0, 1.0)
         if float(viable.max()) <= 0.0:
             return
@@ -779,10 +791,10 @@ class Planet:
         mutation_rates = np.array([self.species[i].traits.mutation_rate for i in living_indices], dtype=np.float64)
         weights = totals * mutation_rates
         total_weight = float(weights.sum())
-        if total_weight <= 2.0:
+        if total_weight <= 0.75:
             return
 
-        expected = self.config.speciation_rate * max(1, steps) * min(12.0, total_weight / 28.0)
+        expected = self.config.speciation_rate * max(1, steps) * min(18.0, total_weight / 18.0)
         event_count = int(self.rng.poisson(expected))
         if event_count <= 0:
             return

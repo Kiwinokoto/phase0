@@ -1,7 +1,8 @@
 import numpy as np
 
 from alife import Planet, PlanetConfig
-from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, geological_intro_stage, render_geological_intro_layer, render_globe_texture, render_layer, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay
+from alife.planet import SimulationEvent
+from alife.viewer import DETAIL_SETUP_FIELDS, PLANET_SETUP_FIELDS, PRIMARY_SETUP_FIELDS, PlanetViewer, geological_intro_stage, render_geological_intro_layer, render_globe_texture, render_layer, render_star_background, season_label, season_position, should_apply_life_overlay, should_apply_weather_overlay
 
 
 NORMALIZED_FIELD_NAMES = [
@@ -717,3 +718,135 @@ def test_weather_all_overlay_and_globe_projection_render():
     assert globe.dtype == np.uint8
     assert float(globe.std()) > 0.0
 
+
+
+
+def test_event_log_filters_keep_branches_visible_while_hiding_noise():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=4445, seasonal_period_ticks=1200))
+    planet.tick = 5000
+    planet.event_log = [
+        SimulationEvent(100, "birth", "Root-001 appears"),
+        SimulationEvent(2200, "birth", "Late-002 appears"),
+        SimulationEvent(2300, "volcanism", "volcanic pulse"),
+        SimulationEvent(2400, "branch", "Child-003 branches from Root-001"),
+        SimulationEvent(2500, "extinction", "Root-001 goes extinct"),
+    ]
+
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+    viewer.event_filter_show_volcanism = False
+    viewer.event_birth_filter_mode = "early"
+
+    visible = viewer._filtered_events_newest(limit=None)
+    assert [event.kind for event in visible] == ["extinction", "branch", "birth"]
+    assert visible[1].kind == "branch"
+
+    viewer.event_birth_filter_mode = "hidden"
+    visible = viewer._filtered_events_newest(limit=None)
+    assert [event.kind for event in visible] == ["extinction", "branch"]
+
+    viewer.event_filter_show_volcanism = True
+    viewer.event_birth_filter_mode = "all"
+    visible = viewer._filtered_events_newest(limit=None)
+    assert [event.kind for event in visible] == ["extinction", "branch", "volcanism", "birth", "birth"]
+
+
+def test_birth_event_cutoff_uses_at_least_one_seed_year():
+    planet = Planet.generate(PlanetConfig(width=32, height=16, seed=4546, seasonal_period_ticks=1600))
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    viewer.planet = planet
+
+    assert viewer._birth_event_cutoff_tick() == 1600
+
+
+def test_biomass_overlay_uses_different_land_and_ocean_tints():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=5657))
+    # Force visible biomass on one land and one ocean cell so the overlay can be
+    # validated without depending on stochastic life spread.
+    planet.biomass.fill(0.0)
+    land_y, land_x = np.argwhere(planet.land)[0]
+    ocean_y, ocean_x = np.argwhere(~planet.land)[0]
+    planet.biomass[land_y, land_x] = 0.8
+    planet.biomass[ocean_y, ocean_x] = 0.8
+
+    plain = render_layer(planet, "biome", overlay_mode="off")
+    overlay = render_layer(planet, "biome", overlay_mode="biomass")
+
+    assert not np.array_equal(plain[land_y, land_x], overlay[land_y, land_x])
+    assert not np.array_equal(plain[ocean_y, ocean_x], overlay[ocean_y, ocean_x])
+    assert not np.array_equal(overlay[land_y, land_x], overlay[ocean_y, ocean_x])
+
+
+def test_event_log_marks_descendant_events_in_yellow():
+    viewer = PlanetViewer.__new__(PlanetViewer)
+    branch_color = viewer._event_kind_color("branch")
+    birth_color = viewer._event_kind_color("birth")
+
+    assert branch_color[0] >= 240 and branch_color[1] >= 190 and branch_color[2] < 140
+    assert branch_color != birth_color
+
+
+def test_abiogenesis_reserves_lineage_capacity_for_descendants():
+    planet = Planet.generate(
+        PlanetConfig(
+            width=48,
+            height=24,
+            seed=5758,
+            max_species=20,
+            min_branch_reserved_slots=6,
+            abiogenesis_rate=1.0,
+            abiogenesis_fertility_threshold=0.0,
+            speciation_rate=0.0,
+        )
+    )
+    planet.step(4000)
+
+    assert len(planet.species) <= planet.config.max_species - planet.config.min_branch_reserved_slots
+
+
+def test_branching_can_create_descendant_lineages_when_capacity_exists():
+    planet = Planet.generate(
+        PlanetConfig(
+            width=48,
+            height=24,
+            seed=5859,
+            max_species=20,
+            abiogenesis_rate=0.0,
+            speciation_rate=0.5,
+            mutation_strength=0.12,
+        )
+    )
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    planet.populations[0] *= 0.0
+    planet._add_population_blob(0, int(y), int(x), amount=2.5, radius=5.0)
+    planet._maybe_branch_lineages(steps=5000)
+
+    assert any(species.parent_id is not None for species in planet.species)
+    assert any(event.kind == "branch" for event in planet.event_log)
+
+
+def test_star_background_is_seeded_and_rotates():
+    first = render_star_background((180, 120), seed=4242, rotation=0.0)
+    repeat = render_star_background((180, 120), seed=4242, rotation=0.0)
+    rotated = render_star_background((180, 120), seed=4242, rotation=0.8)
+
+    assert first.shape == (120, 180, 3)
+    assert first.dtype == np.uint8
+    np.testing.assert_array_equal(first, repeat)
+    assert not np.array_equal(first, rotated)
+    assert int(first.max()) > 80
+
+
+def test_globe_projection_can_render_rotating_star_background():
+    planet = Planet.generate(PlanetConfig(width=64, height=32, seed=5151))
+    texture = render_layer(planet, "biome")
+    sky_a = render_globe_texture(texture, (180, 140), rotation=0.2, star_rotation=0.0, seed=planet.config.seed)
+    sky_b = render_globe_texture(texture, (180, 140), rotation=0.2, star_rotation=1.0, seed=planet.config.seed)
+
+    assert sky_a.shape == (140, 180, 3)
+    assert sky_a.dtype == np.uint8
+    assert not np.array_equal(sky_a, sky_b)
+    # Outside the globe should no longer be a flat black background in 3D mode.
+    corner = sky_a[:24, :24]
+    assert float(corner.std()) > 0.0

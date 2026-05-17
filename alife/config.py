@@ -89,7 +89,9 @@ class PlanetConfig:
     dead_matter_decay_rate: float = 0.0018
     dead_matter_recycling_rate: float = 0.45
 
-    speciation_rate: float = 0.000075
+    speciation_rate: float = 0.00018
+    abiogenesis_root_soft_cap_fraction: float = 0.52
+    min_branch_reserved_slots: int = 10
     mutation_strength: float = 0.09
     extinction_population_threshold: float = 0.010
 
