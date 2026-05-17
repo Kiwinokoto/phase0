@@ -1,4 +1,4 @@
-"""Phase 5 prototype for richer abstract proto-ecology."""
+"""Phase 6 prototype for mobility, colonization and local divergence."""
 
 from .config import PlanetConfig
 from .life import LifeSpecies, LifeTraits

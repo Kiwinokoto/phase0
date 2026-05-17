@@ -50,6 +50,8 @@ class LineageHabitatSummary:
     mean_chemical_energy: float
     mean_dead_matter: float
     mean_biotic_pressure: float
+    mean_migration_pressure: float
+    mean_isolation_pressure: float
     mean_light: float
     land_share: float
 
@@ -84,6 +86,8 @@ class Planet:
     fertility: np.ndarray
     dead_matter: np.ndarray
     biotic_pressure: np.ndarray
+    migration_pressure: np.ndarray
+    isolation_pressure: np.ndarray
     populations: np.ndarray
     biomass: np.ndarray
     diversity: np.ndarray
@@ -129,6 +133,8 @@ class Planet:
         )
         dead_matter = np.zeros_like(fertility, dtype=np.float32)
         biotic_pressure = np.zeros_like(fertility, dtype=np.float32)
+        migration_pressure = np.zeros_like(fertility, dtype=np.float32)
+        isolation_pressure = np.zeros_like(fertility, dtype=np.float32)
         populations = np.zeros((config.max_species, config.height, config.width), dtype=np.float32)
         biomass = np.zeros_like(fertility, dtype=np.float32)
         diversity = np.zeros_like(fertility, dtype=np.float32)
@@ -156,6 +162,8 @@ class Planet:
             fertility=fertility,
             dead_matter=dead_matter,
             biotic_pressure=biotic_pressure,
+            migration_pressure=migration_pressure,
+            isolation_pressure=isolation_pressure,
             populations=populations,
             biomass=biomass,
             diversity=diversity,
@@ -321,6 +329,8 @@ class Planet:
         mean_chemical_energy = weighted_mean(self.chemical_energy)
         mean_dead_matter = weighted_mean(self.dead_matter)
         mean_biotic_pressure = weighted_mean(self.biotic_pressure)
+        mean_migration_pressure = weighted_mean(self.migration_pressure)
+        mean_isolation_pressure = weighted_mean(self.isolation_pressure)
         mean_light = weighted_mean(self.light)
         main_habitat = _infer_habitat_label(
             land_share=land_share,
@@ -343,6 +353,8 @@ class Planet:
             mean_chemical_energy=mean_chemical_energy,
             mean_dead_matter=mean_dead_matter,
             mean_biotic_pressure=mean_biotic_pressure,
+            mean_migration_pressure=mean_migration_pressure,
+            mean_isolation_pressure=mean_isolation_pressure,
             mean_light=mean_light,
             land_share=land_share,
         )
@@ -583,12 +595,16 @@ class Planet:
     def _update_life(self, steps: int) -> None:
         if not self.species:
             self.biotic_pressure *= _decay_factor(self.config.biotic_pressure_decay_rate, steps)
+            self.migration_pressure *= _decay_factor(self.config.colonization_decay_rate, steps)
+            self.isolation_pressure *= _decay_factor(self.config.isolation_decay_rate, steps)
             return
 
         # Keep large fast-forward steps stable without doing one Python loop per tick.
         chunks = max(1, min(48, int(np.ceil(steps / 32))))
         dt = max(1.0, float(steps) / float(chunks))
         phase5_pressure = np.zeros_like(self.biotic_pressure, dtype=np.float32)
+        phase6_migration = np.zeros_like(self.migration_pressure, dtype=np.float32)
+        phase6_isolation = np.zeros_like(self.isolation_pressure, dtype=np.float32)
 
         for _ in range(chunks):
             self._update_dead_matter(dt)
@@ -682,11 +698,28 @@ class Planet:
                 updated = np.maximum(updated - turnover_deaths, 0.0).astype(np.float32)
 
                 if traits.dispersal > 0.0:
+                    before_move = updated.copy()
                     updated = _diffuse(
                         updated,
                         self.config.life_dispersal_rate * traits.dispersal,
                         max(1, int(round(dt))),
                     ).astype(np.float32)
+                    updated, moved = _adaptive_migrate(
+                        updated,
+                        habitat_fit.astype(np.float32),
+                        self.config.active_migration_rate * traits.dispersal,
+                        dt,
+                    )
+                    if float(moved.max()) > 0.0:
+                        migration_loss = np.minimum(updated, moved * self.config.active_migration_cost * (0.35 + traits.dispersal))
+                        updated = np.maximum(updated - migration_loss, 0.0).astype(np.float32)
+                        self.dead_matter += (0.18 * migration_loss).astype(np.float32)
+                        colonized = np.clip((updated - before_move) * (before_move < 0.004), 0.0, 1.0)
+                        phase6_migration = np.maximum(phase6_migration, np.clip(moved + 2.0 * colonized, 0.0, 1.0).astype(np.float32))
+
+                isolation_map = _isolation_map(updated)
+                if float(isolation_map.max()) > 0.0:
+                    phase6_isolation = np.maximum(phase6_isolation, isolation_map).astype(np.float32)
 
                 deaths = np.maximum(pop - updated, 0.0)
                 growth_amount = np.maximum(updated - pop, 0.0)
@@ -758,6 +791,16 @@ class Planet:
         self.biotic_pressure = _diffuse(self.biotic_pressure, 0.006, max(1, min(8, int(round(steps / 64))))).astype(np.float32)
         self.biotic_pressure = np.clip(self.biotic_pressure, 0.0, 1.0).astype(np.float32)
 
+        self.migration_pressure *= _decay_factor(self.config.colonization_decay_rate, steps)
+        self.migration_pressure = np.maximum(self.migration_pressure, phase6_migration).astype(np.float32)
+        self.migration_pressure = _diffuse(self.migration_pressure, 0.010, max(1, min(8, int(round(steps / 64))))).astype(np.float32)
+        self.migration_pressure = np.clip(self.migration_pressure, 0.0, 1.0).astype(np.float32)
+
+        self.isolation_pressure *= _decay_factor(self.config.isolation_decay_rate, steps)
+        self.isolation_pressure = np.maximum(self.isolation_pressure, phase6_isolation).astype(np.float32)
+        self.isolation_pressure = _diffuse(self.isolation_pressure, 0.006, max(1, min(6, int(round(steps / 96))))).astype(np.float32)
+        self.isolation_pressure = np.clip(self.isolation_pressure, 0.0, 1.0).astype(np.float32)
+
     def _update_dead_matter(self, dt: float) -> None:
         if float(self.dead_matter.max()) <= 0.0:
             return
@@ -789,12 +832,14 @@ class Planet:
 
         totals = np.array([float(self.populations[i].sum()) for i in living_indices], dtype=np.float64)
         mutation_rates = np.array([self.species[i].traits.mutation_rate for i in living_indices], dtype=np.float64)
-        weights = totals * mutation_rates
+        isolation_scores = np.array([self._species_isolation_score(i) for i in living_indices], dtype=np.float64)
+        weights = totals * mutation_rates * (1.0 + self.config.isolation_branch_weight * isolation_scores)
         total_weight = float(weights.sum())
         if total_weight <= 0.75:
             return
 
-        expected = self.config.speciation_rate * max(1, steps) * min(18.0, total_weight / 18.0)
+        isolation_bonus = 1.0 + 0.55 * float(np.clip(isolation_scores.mean() if isolation_scores.size else 0.0, 0.0, 2.0))
+        expected = self.config.speciation_rate * max(1, steps) * min(18.0, total_weight / 18.0) * isolation_bonus
         event_count = int(self.rng.poisson(expected))
         if event_count <= 0:
             return
@@ -808,9 +853,38 @@ class Planet:
             parent_pop = self.populations[parent_index]
             if float(parent_pop.max()) <= 0.02:
                 continue
-            flat_index = int(np.argmax(parent_pop))
-            y, x = divmod(flat_index, self.config.width)
+            y, x = self._choose_branch_location(parent_index)
             self._create_mutant_species(parent_index, y, x)
+
+
+    def _species_isolation_score(self, index: int) -> float:
+        """Return a compact score for edge/isolated populations of one lineage."""
+        if index < 0 or index >= len(self.species):
+            return 0.0
+        pop = np.clip(self.populations[index], 0.0, None)
+        total = float(pop.sum())
+        if total <= 1e-6:
+            return 0.0
+        iso = _isolation_map(pop)
+        weighted = float((iso * pop).sum() / total)
+        # Widespread lineages with frontier/island colonies are better branch
+        # candidates than tiny founder populations that are just noise.
+        range_factor = float(np.clip(total / 140.0, 0.0, 1.0))
+        return float(np.clip(weighted * (0.35 + 0.65 * range_factor), 0.0, 1.0))
+
+    def _choose_branch_location(self, parent_index: int) -> tuple[int, int]:
+        """Pick a branch location, favoring isolated/frontier colonies."""
+        parent_pop = np.clip(self.populations[parent_index], 0.0, None).astype(np.float64)
+        iso = _isolation_map(parent_pop).astype(np.float64)
+        frontier_weight = np.clip(iso - self.config.isolation_branch_threshold, 0.0, 1.0)
+        weights = parent_pop * (0.20 + 3.40 * frontier_weight + 0.85 * self.migration_pressure)
+        total = float(weights.sum())
+        if total <= 1e-12:
+            flat_index = int(np.argmax(parent_pop))
+        else:
+            flat_index = int(self.rng.choice(weights.size, p=(weights / total).ravel()))
+        y, x = divmod(flat_index, self.config.width)
+        return int(y), int(x)
 
     def _create_mutant_species(self, parent_index: int, y: int, x: int) -> None:
         parent = self.species[parent_index]
@@ -843,6 +917,8 @@ class Planet:
             self.diversity.fill(0.0)
             self.dominant_species_index.fill(-1)
             self.biotic_pressure.fill(0.0)
+            self.migration_pressure.fill(0.0)
+            self.isolation_pressure.fill(0.0)
             return
 
         active = self.populations[: len(self.species)]
@@ -912,6 +988,8 @@ def _empty_habitat_summary(species_id: int, total_population: float = 0.0) -> Li
         mean_chemical_energy=0.0,
         mean_dead_matter=0.0,
         mean_biotic_pressure=0.0,
+        mean_migration_pressure=0.0,
+        mean_isolation_pressure=0.0,
         mean_light=0.0,
         land_share=0.0,
     )
@@ -1192,6 +1270,95 @@ def _generate_fertility(
     fertility *= 1.0 - config.toxicity_fertility_penalty * toxicity
     return np.clip(fertility, 0.0, 1.0).astype(np.float32)
 
+
+
+def _adaptive_migrate(
+    population: np.ndarray,
+    habitat_quality: np.ndarray,
+    rate: float,
+    dt: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Move a fraction of a population field toward better neighboring habitat.
+
+    This is a small population-level approximation, not individual steering. It
+    keeps Phase 6 cheap while making geography matter: colonies drift toward
+    local niches instead of only blurring outward. Horizontal movement wraps on
+    the planet; vertical movement clips at the poles.
+    """
+    rate = float(rate)
+    if rate <= 0.0 or float(population.max()) <= 0.0:
+        return population.astype(np.float32), np.zeros_like(population, dtype=np.float32)
+
+    pop = np.clip(population.astype(np.float32), 0.0, 1.0)
+    quality = np.clip(habitat_quality.astype(np.float32), 0.0, 1.0)
+    strength = float(np.clip(rate * max(1.0, float(dt)), 0.0, 0.42))
+    if strength <= 0.0:
+        return pop, np.zeros_like(pop, dtype=np.float32)
+
+    neighbors = (
+        (np.roll(quality, -1, axis=1), "east"),
+        (np.roll(quality, 1, axis=1), "west"),
+        (_shift_vertical(quality, -1), "south"),
+        (_shift_vertical(quality, 1), "north"),
+    )
+    improvements = [np.clip(neighbor - quality, 0.0, 1.0) for neighbor, _name in neighbors]
+    total_improvement = np.sum(improvements, axis=0).astype(np.float32)
+    if float(total_improvement.max()) <= 1e-8:
+        return pop, np.zeros_like(pop, dtype=np.float32)
+
+    out_total = pop * strength * np.clip(total_improvement, 0.0, 1.0)
+    out_total = np.minimum(out_total, pop * 0.55).astype(np.float32)
+    result = pop - out_total
+    moved = out_total.copy()
+
+    denom = np.maximum(total_improvement, 1e-8)
+    for improvement, (_neighbor, direction) in zip(improvements, neighbors):
+        flow = out_total * (improvement / denom)
+        result += _shift_flow_to_destination(flow.astype(np.float32), direction)
+
+    return np.clip(result, 0.0, 1.0).astype(np.float32), np.clip(moved, 0.0, 1.0).astype(np.float32)
+
+
+def _shift_vertical(values: np.ndarray, direction: int) -> np.ndarray:
+    """Shift a map vertically without wrapping over the poles."""
+    out = np.empty_like(values)
+    if direction < 0:  # read neighbor toward increasing y
+        out[:-1] = values[1:]
+        out[-1] = values[-1]
+    elif direction > 0:
+        out[1:] = values[:-1]
+        out[0] = values[0]
+    else:
+        out[:] = values
+    return out
+
+
+def _shift_flow_to_destination(flow: np.ndarray, direction: str) -> np.ndarray:
+    """Move source-cell flow into its chosen neighboring destination."""
+    if direction == "east":
+        return np.roll(flow, 1, axis=1)
+    if direction == "west":
+        return np.roll(flow, -1, axis=1)
+    out = np.zeros_like(flow)
+    if direction == "south":
+        out[1:] = flow[:-1]
+    elif direction == "north":
+        out[:-1] = flow[1:]
+    else:
+        out[:] = flow
+    return out
+
+
+def _isolation_map(population: np.ndarray) -> np.ndarray:
+    """Highlight frontier/island colonies of one population field."""
+    pop = np.clip(population.astype(np.float32), 0.0, 1.0)
+    if float(pop.max()) <= 0.0:
+        return np.zeros_like(pop, dtype=np.float32)
+    occupied = (pop > 0.008).astype(np.float32)
+    local_support = _blur4(occupied, passes=2)
+    edge = np.clip(1.0 - local_support, 0.0, 1.0)
+    normalized_pop = np.clip(pop / max(float(pop.max()), 1e-6), 0.0, 1.0)
+    return np.clip(edge * np.sqrt(normalized_pop), 0.0, 1.0).astype(np.float32)
 
 def _diffuse(values: np.ndarray, rate: float, steps: int) -> np.ndarray:
     # One stable macro diffusion pass. The exponential scaling means x1 and

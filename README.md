@@ -1,8 +1,8 @@
-# Artificial Life Sandbox — Phase 5
+# Artificial Life Sandbox — Phase 6
 
-Prototype Python minimal pour générer et observer une planète 2D avec proto-vie abstraite et interactions écologiques.
+Prototype Python minimal pour générer et observer une planète 2D/3D avec proto-vie abstraite, interactions écologiques, mobilité et colonisation.
 
-Phase 5 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle enrichit plutôt les traits : certaines lignées peuvent extraire de l'énergie depuis la biomasse vivante, d'autres résistent mieux via défense/stockage, et la carte expose une nouvelle couche de pression biotique.
+Phase 6 ne crée toujours **pas** de plantes, animaux, herbivores ou prédateurs codés en dur. Elle ajoute plutôt une mobilité populationnelle : les lignées peuvent se disperser passivement, migrer activement vers de meilleurs habitats, coloniser des fronts locaux, puis brancher plus facilement quand des colonies deviennent isolées.
 
 
 ## Écran d’accueil / setup planète
@@ -129,6 +129,8 @@ biomass          densité totale de proto-vie vivante
 diversity        coexistence locale de plusieurs lignées
 dominant_life    couleur de la lignée dominante + densité de biomasse
 biotic_pressure  pression locale de consommation de biomasse vivante
+migration_pressure  fronts récents de mobilité/colonisation
+isolation_pressure  colonies de bord/îlots propices à la différenciation
 ```
 
 ## Overlays
@@ -154,7 +156,7 @@ Weather: off     carte biome brute sans atmosphère
 
 La météo reste visuelle : elle est conséquence des champs existants, pas une cause écologique. Elle varie avec le tick et la saison pour éviter une pluie figée en permanence. Les années sont maintenant de durée seed-dérivée par défaut, donc toutes les planètes ne tournent pas sur le même calendrier de 2400 ticks.
 
-## Logique Phase 5
+## Logique Phase 6
 
 La vie reste abstraite et populationnelle : une lignée n'est pas un individu, c'est un champ de population local.
 
@@ -187,11 +189,14 @@ mutation_rate         probabilité de branchement évolutif
 5. les populations paient un coût de maintenance en ressources ;
 6. la surpopulation, la famine et le stress produisent de la matière morte ;
 7. dead_matter recycle lentement des nutriments ;
-8. les populations se dispersent légèrement ;
-9. des branches mutantes apparaissent parfois ;
-10. une pression biotique locale apparaît quand des lignées exploitent d'autres biomasses ;
-11. défense et stockage réduisent une partie de cette pression ;
-12. les lignées trop faibles s'éteignent.
+8. les populations se dispersent passivement ;
+9. les populations mobiles migrent légèrement vers les cellules voisines plus favorables ;
+10. les fronts de colonisation alimentent `migration_pressure` ;
+11. les colonies de bord/îlots alimentent `isolation_pressure` ;
+12. des branches mutantes apparaissent parfois, avec un bonus si la lignée a des colonies isolées ;
+13. une pression biotique locale apparaît quand des lignées exploitent d'autres biomasses ;
+14. défense et stockage réduisent une partie de cette pression ;
+15. les lignées trop faibles s'éteignent.
 ```
 
 ## Ce qu'il faut observer
@@ -206,6 +211,8 @@ dominant_life   quelle lignée domine localement
 diversity       où plusieurs lignées coexistent
 dead_matter     traces d'effondrement/recyclage
 biotic_pressure  zones où la vie exerce une pression sur la vie
+migration_pressure  fronts de déplacement/colonisation récents
+isolation_pressure  colonies marginales pouvant brancher en descendants
 clouds/rain     couches atmosphériques dédiées + overlay météo sur biome
 nutrients       ressources consommées puis recyclées
 ```
@@ -249,6 +256,7 @@ Les tests vérifient notamment :
 - production de matière morte après croissance/stress ;
 - population contrainte par les ressources ;
 - traits Phase 5 `living_consumption`, `defense`, `storage` ;
+- couches Phase 6 `migration_pressure` et `isolation_pressure` ;
 - couche `biotic_pressure` visible lorsque la vie interagit avec la vie ;
 - évolution déterministe à seed et steps identiques ;
 - rendu d'intro géologique déterministe et sans effet sur la simulation ;
@@ -425,3 +433,20 @@ Root births are still independent abiogenesis events. True descendants appear as
 - étoiles générées de manière déterministe depuis la seed ;
 - rotation lente du ciel sur un cycle d'une année locale ;
 - purement visuel : aucun effet sur saisons, météo ou simulation.
+
+
+## Phase 6 mobility / colonization
+
+Phase 6 ajoute une mobilité encore abstraite, mais plus directionnelle que la simple diffusion :
+
+```text
+- dispersal reste un trait héritable ;
+- la diffusion passive continue d'étaler les populations ;
+- une migration active déplace une petite fraction vers des cellules voisines plus adaptées ;
+- chaque déplacement coûte un peu de biomasse/énergie ;
+- migration_pressure montre les fronts récents de mouvement/colonisation ;
+- isolation_pressure met en évidence les colonies de bord ou d'îlot ;
+- la spéciation est légèrement biaisée vers ces colonies isolées.
+```
+
+Ce n'est toujours pas un modèle d'individus. Une lignée reste un champ de population. L'objectif est de rendre la géographie plus importante : îles, côtes, fronts d'expansion et niches séparées doivent commencer à produire des branches généalogiques plus lisibles.

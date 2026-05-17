@@ -22,6 +22,8 @@ NORMALIZED_FIELD_NAMES = [
     "fertility",
     "dead_matter",
     "biotic_pressure",
+    "migration_pressure",
+    "isolation_pressure",
     "biomass",
     "diversity",
 ]
@@ -36,6 +38,8 @@ DYNAMIC_FIELD_NAMES = [
     "fertility",
     "dead_matter",
     "biotic_pressure",
+    "migration_pressure",
+    "isolation_pressure",
     "biomass",
     "diversity",
 ]
@@ -850,3 +854,75 @@ def test_globe_projection_can_render_rotating_star_background():
     # Outside the globe should no longer be a flat black background in 3D mode.
     corner = sky_a[:24, :24]
     assert float(corner.std()) > 0.0
+
+
+def test_phase6_mobility_fields_are_bounded_and_renderable():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=6263,
+        abiogenesis_rate=0.30,
+        abiogenesis_fertility_threshold=0.18,
+        active_migration_rate=0.12,
+    )
+    planet = Planet.generate(config)
+    for _ in range(6):
+        planet.step(500)
+
+    assert planet.total_biomass > 0.0
+    assert float(planet.migration_pressure.min()) >= 0.0
+    assert float(planet.migration_pressure.max()) <= 1.0
+    assert float(planet.isolation_pressure.min()) >= 0.0
+    assert float(planet.isolation_pressure.max()) <= 1.0
+    assert float(planet.migration_pressure.max()) > 0.0
+
+    migration_rgb = render_layer(planet, "migration_pressure")
+    isolation_rgb = render_layer(planet, "isolation_pressure")
+    assert migration_rgb.shape == isolation_rgb.shape == (32, 64, 3)
+    assert migration_rgb.dtype == isolation_rgb.dtype == np.uint8
+
+
+def test_phase6_isolation_biases_branch_locations_and_descendants():
+    planet = Planet.generate(
+        PlanetConfig(
+            width=48,
+            height=24,
+            seed=6364,
+            max_species=20,
+            abiogenesis_rate=0.0,
+            speciation_rate=0.5,
+            active_migration_rate=0.0,
+            mutation_strength=0.12,
+        )
+    )
+    y, x = np.unravel_index(np.argmax(planet.fertility), planet.fertility.shape)
+    planet._create_seed_species(int(y), int(x))
+    planet.populations[0].fill(0.0)
+    planet._add_population_blob(0, int(y), int(x), amount=1.0, radius=4.0)
+    # Add a small isolated colony far away so frontier pressure has something to select.
+    planet._add_population_blob(0, int(max(1, y // 2)), int((x + 17) % planet.config.width), amount=0.45, radius=1.2)
+    planet._update_biomass_maps()
+
+    assert planet._species_isolation_score(0) > 0.0
+    planet._maybe_branch_lineages(steps=5000)
+
+    assert any(species.parent_id == 1 for species in planet.species)
+    assert any(event.kind == "branch" for event in planet.event_log)
+
+
+def test_lineage_habitat_summary_includes_phase6_observer_fields():
+    config = PlanetConfig(
+        width=64,
+        height=32,
+        seed=6465,
+        abiogenesis_rate=0.30,
+        abiogenesis_fertility_threshold=0.18,
+        active_migration_rate=0.12,
+    )
+    planet = Planet.generate(config)
+    planet.step(1200)
+    species, _total = planet.top_species(limit=1)[0]
+    summary = planet.lineage_habitat_summary(species.id)
+
+    assert 0.0 <= summary.mean_migration_pressure <= 1.0
+    assert 0.0 <= summary.mean_isolation_pressure <= 1.0

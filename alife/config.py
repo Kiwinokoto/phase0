@@ -7,10 +7,9 @@ from dataclasses import dataclass
 class PlanetConfig:
     """Configuration for a generated 2D planet.
 
-    Phase 5 keeps proto-life abstract while adding richer ecological roles:
-    lineages may extract energy from living biomass, resist that pressure, or
-    buffer hard periods with storage. These are still traits, not hard-coded
-    plants/animals/predators.
+    Phase 6 keeps proto-life abstract while adding mobility, colonization
+    pressure and isolation-driven branching. These are still traits and
+    population fields, not hard-coded plants/animals/predators.
     """
 
     width: int = 256
@@ -60,7 +59,7 @@ class PlanetConfig:
     volcanic_pulse_strength: float = 0.55
 
 
-    # Phase 5 proto-life. Populations are stored per lineage and per map cell;
+    # Phase 6 proto-life. Populations are stored per lineage and per map cell;
     # these are still abstract population fields, not individual organisms.
     max_species: int = 64
     abiogenesis_rate: float = 0.0060
@@ -74,6 +73,16 @@ class PlanetConfig:
     life_maintenance_consumption_rate: float = 0.0016
     life_turnover_rate: float = 0.0018
     life_dispersal_rate: float = 0.018
+
+    # Phase 6 mobility/colonization. Passive dispersal already exists via
+    # diffusion; active migration moves population toward locally better
+    # neighboring habitat and creates observable colonization/isolation maps.
+    active_migration_rate: float = 0.034
+    active_migration_cost: float = 0.045
+    colonization_decay_rate: float = 0.060
+    isolation_decay_rate: float = 0.050
+    isolation_branch_weight: float = 4.6
+    isolation_branch_threshold: float = 0.10
 
     # Phase 5 life-on-life pressure. Consumers gain energy from neighboring
     # biomass fields; prey lineages resist via defense/storage. This remains a
@@ -123,5 +132,9 @@ class PlanetConfig:
             raise ValueError("life_turnover_rate must be >= 0.")
         if self.biotic_pressure_rate < 0.0:
             raise ValueError("biotic_pressure_rate must be >= 0.")
+        if self.active_migration_rate < 0.0:
+            raise ValueError("active_migration_rate must be >= 0.")
+        if self.active_migration_cost < 0.0:
+            raise ValueError("active_migration_cost must be >= 0.")
         if self.initial_speed < 1:
             raise ValueError("initial_speed must be >= 1.")

@@ -16,7 +16,7 @@ WeatherOverlayMode = str
 ProjectionMode = str
 Color = tuple[int, int, int]
 
-LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life", "biotic_pressure")
+LIFE_LAYER_NAMES: tuple[LayerName, ...] = ("dead_matter", "biomass", "diversity", "dominant_life", "biotic_pressure", "migration_pressure", "isolation_pressure")
 ATMOSPHERE_LAYER_NAMES: tuple[LayerName, ...] = ("clouds", "rain")
 LIFE_OVERLAY_MODES: tuple[OverlayMode, ...] = ("off", "biomass", "dominant")
 WEATHER_OVERLAY_MODES: tuple[WeatherOverlayMode, ...] = ("off", "clouds", "rain", "all")
@@ -197,6 +197,18 @@ LAYER_LEGENDS: dict[LayerName, LayerLegend] = {
         colors=((10, 12, 18), (110, 54, 85), (245, 118, 70)),
         labels=("quiet", "pressure", "intense"),
     ),
+    "migration_pressure": LayerLegend(
+        title="Migration / colonization",
+        description=("Active drift toward better niches.", "Bright zones are recent frontiers."),
+        colors=((8, 10, 18), (42, 118, 150), (120, 240, 210)),
+        labels=("quiet", "moving", "frontier"),
+    ),
+    "isolation_pressure": LayerLegend(
+        title="Isolation pressure",
+        description=("Frontier/island colonies likely", "to branch into descendants."),
+        colors=((12, 10, 18), (94, 70, 150), (255, 218, 92)),
+        labels=("connected", "edge", "isolated"),
+    ),
 }
 
 
@@ -223,6 +235,8 @@ class PlanetViewer:
         "diversity",
         "dominant_life",
         "biotic_pressure",
+        "migration_pressure",
+        "isolation_pressure",
     )
 
     def __init__(self, planet: Planet, scale: int = 4, start_fullscreen: bool = True) -> None:
@@ -677,6 +691,8 @@ class PlanetViewer:
                 ("cloud/rain", self._weather_mean_label()),
                 ("bio land", f"{self._land_biomass_share():.1f}%"),
                 ("bio ocean", self._ocean_biomass_share_label()),
+                ("migr", f"{self.planet.migration_pressure.mean():.3f}"),
+                ("isolate", f"{self.planet.isolation_pressure.mean():.3f}"),
             ),
             x,
             y,
@@ -1108,6 +1124,8 @@ class PlanetViewer:
                 ("cloud/rain", self._weather_mean_label()),
                 ("bio land", f"{self._land_biomass_share():.1f}%"),
                 ("bio ocean", self._ocean_biomass_share_label()),
+                ("migr", f"{self.planet.migration_pressure.mean():.3f}"),
+                ("isolate", f"{self.planet.isolation_pressure.mean():.3f}"),
             ),
             x,
             y,
@@ -1140,6 +1158,8 @@ class PlanetViewer:
                 ("tox", f"{self.planet.toxicity[cell_y, cell_x]:.2f}"),
                 ("dead", f"{self.planet.dead_matter[cell_y, cell_x]:.3f}"),
                 ("biotic", f"{self.planet.biotic_pressure[cell_y, cell_x]:.3f}"),
+                ("migr", f"{self.planet.migration_pressure[cell_y, cell_x]:.3f}"),
+                ("isolate", f"{self.planet.isolation_pressure[cell_y, cell_x]:.3f}"),
             ),
             x,
             y,
@@ -1236,6 +1256,8 @@ class PlanetViewer:
                 ("chem", f"{summary.mean_chemical_energy:.2f}"),
                 ("dead", f"{summary.mean_dead_matter:.3f}"),
                 ("biotic", f"{summary.mean_biotic_pressure:.3f}"),
+                ("migr", f"{summary.mean_migration_pressure:.3f}"),
+                ("isolate", f"{summary.mean_isolation_pressure:.3f}"),
                 ("light", f"{summary.mean_light:.2f}"),
             ),
             x,
@@ -2417,6 +2439,10 @@ def _render_base_layer(planet: Planet, layer: LayerName) -> np.ndarray:
         return _render_dominant_life(planet)
     if layer == "biotic_pressure":
         return _render_biotic_pressure(planet)
+    if layer == "migration_pressure":
+        return _render_migration_pressure(planet)
+    if layer == "isolation_pressure":
+        return _render_isolation_pressure(planet)
     raise ValueError(f"Unknown layer: {layer}")
 
 
@@ -2556,6 +2582,28 @@ def _render_biotic_pressure(planet: Planet) -> np.ndarray:
     scale = max(scale, 0.025)
     visible = np.clip(field / scale, 0.0, 1.0)
     return _three_color_gradient(visible, (10, 12, 18), (110, 54, 85), (245, 118, 70))
+
+
+def _render_migration_pressure(planet: Planet) -> np.ndarray:
+    field = np.clip(planet.migration_pressure, 0.0, 1.0)
+    if float(field.max()) <= 1e-7:
+        return _three_color_gradient(field, (8, 10, 18), (42, 118, 150), (120, 240, 210))
+    nonzero = field[field > 1e-7]
+    scale = float(np.quantile(nonzero, 0.985)) if nonzero.size else float(field.max())
+    scale = max(scale, 0.018)
+    visible = np.clip(field / scale, 0.0, 1.0)
+    return _three_color_gradient(visible, (8, 10, 18), (42, 118, 150), (120, 240, 210))
+
+
+def _render_isolation_pressure(planet: Planet) -> np.ndarray:
+    field = np.clip(planet.isolation_pressure, 0.0, 1.0)
+    if float(field.max()) <= 1e-7:
+        return _three_color_gradient(field, (12, 10, 18), (94, 70, 150), (255, 218, 92))
+    nonzero = field[field > 1e-7]
+    scale = float(np.quantile(nonzero, 0.985)) if nonzero.size else float(field.max())
+    scale = max(scale, 0.020)
+    visible = np.clip(field / scale, 0.0, 1.0)
+    return _three_color_gradient(visible, (12, 10, 18), (94, 70, 150), (255, 218, 92))
 
 def _render_dead_matter(planet: Planet) -> np.ndarray:
     # Dead matter is usually a thinner field than living biomass. The simulation
